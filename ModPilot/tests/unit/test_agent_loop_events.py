@@ -731,11 +731,16 @@ async def test_wrong_phase_slot_tool_is_rejected_without_advancing():
         e for e in events if e["type"] == "phase_completed" and e.get("phase") == "phase_6"
     ]
     assert phase_completed_events == []
-    # tool_result emitted with success=False and the mismatch summary.
+    # tool_result emitted with success=False and a rejection summary naming
+    # BOTH the rejected tool and the current phase — the LLM uses the phase
+    # name to self-correct (cf. _execute_tool_call's "not available in {phase}"
+    # message added after PR5 collapsed the legacy phase_slot guard into the
+    # tool-subset filter).
     tool_results = [e for e in events if e["type"] == "tool_result"]
     assert tool_results, "expected at least one tool_result event"
     rejection = tool_results[-1]
     assert rejection["success"] is False
+    assert "setup_import_source" in rejection["summary"]
     assert "phase_6" in rejection["summary"]
     assert "setup_import_source" in rejection["summary"]
 

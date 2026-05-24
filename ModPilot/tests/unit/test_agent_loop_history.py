@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.agent.history import (
-    COMPACT_MARKER,
     QUERY_HISTORY_DEFAULT_LAST_N,
     QUERY_HISTORY_MAX_LAST_N,
     QUERY_HISTORY_TOOL_NAME,
@@ -167,13 +166,19 @@ class TestToolCallLogging:
         assert "scale_ratio" in tool_moves[0]["result_summary"]
 
 
-# ── phase advance + compaction ───────────────────────────────────────────────
+# ── phase advance bookkeeping ────────────────────────────────────────────────
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-class TestPhaseAdvanceAndCompaction:
-    async def test_phase_advance_logged_and_flag_set(self, fake_home):
+class TestPhaseAdvanceBookkeeping:
+    """PR6 deleted phase-boundary compaction (each phase now owns an
+    isolated `_phase_history`, so there is no shared history to collapse).
+    The remaining contract: a phase-advancing tool must log a `phase_advance`
+    move so session recovery can count completed phases and `query_history`
+    can replay past phase work."""
+
+    async def test_phase_advance_logs_move_with_to_phase(self, fake_home):
         llm = _make_llm([
             _tool_use_response("t1", "pose_correction", {
                 "x_preset": "MMD", "source_armature": "Body", "target_armature": "MHWs",
@@ -186,138 +191,15 @@ class TestPhaseAdvanceAndCompaction:
             session_id="sess_pa",
         )
         loop.state = LoopState.RUNNING_PHASE
-        # Start at phase_1 (index 4) so this is a clean single-advance test.
         loop._phase_idx = _PHASE_SEQUENCE.index("phase_1")
-        loop._phase_start_idx_global = 0
         from app.phases.pose_correction import PoseCorrection
         with patch.object(PoseCorrection, "run", return_value=PhaseResult.ok({"k": 1})):
             await loop.step("run phase 1")
-        # phase_advance move present
         pa_moves = loop._move_log.read(kind="phase_advance")
         assert len(pa_moves) == 1
         assert pa_moves[0]["phase"] == "phase_1"
         assert pa_moves[0]["to_phase"] == "phase_2"
-        # Flag set so next step() triggers compaction
-        assert loop._just_completed_phase == "phase_1"
-
-    async def test_next_step_compacts_completed_phase(self, fake_home):
-        """End-to-end across two turns: phase 1 runs, wrap-up returned, user
-        sends second message — at top of next _run_react_turn, the previous
-        phase's tool_use/tool_result/wrap-up triplet gets collapsed to one
-        compacted assistant message."""
-        llm = _make_llm([
-            # Turn 1: tool call, then wrap-up
-            _tool_use_response("t1", "pose_correction", {
-                "x_preset": "MMD", "source_armature": "Body", "target_armature": "MHWs",
-            }),
-            _text_response("Phase 1 done — pose corrected via MMD."),
-            # Turn 2: text only (no tool call, just acknowledging)
-            _text_response("Ready for phase 2."),
-        ])
-        loop = AgentLoop(
-            llm=llm,
-            blender=_make_blender(),
-            session_id="sess_compact",
-        )
-        loop.state = LoopState.RUNNING_PHASE
-        loop._phase_idx = _PHASE_SEQUENCE.index("phase_1")
-        loop._phase_start_idx_global = 0
-        from app.phases.pose_correction import PoseCorrection
-        with patch.object(PoseCorrection, "run", return_value=PhaseResult.ok({"k": 1})):
-            await loop.step("run phase 1")
-            # Before turn 2: history should still have full detail (4 messages:
-            # user, assistant tool_use, user tool_result, assistant wrap-up).
-            assert len(loop._global_history) == 4
-            await loop.step("continue")
-        # After turn 2: phase 1's span (indices 0..3) collapsed to a single
-        # compact-marker message; user "continue" + new assistant reply follow.
-        assert any(
-            isinstance(m.get("content"), str) and COMPACT_MARKER in m["content"]
-            for m in loop._global_history
-        )
-        # Wrap-up text should appear inside the compact summary.
-        compact_msg = next(
-            m for m in loop._global_history
-            if isinstance(m.get("content"), str) and COMPACT_MARKER in m["content"]
-        )
-        assert "pose corrected" in compact_msg["content"].lower() or "phase 1 done" in compact_msg["content"].lower()
-        # Flag was consumed.
-        assert loop._just_completed_phase is None
-
-    async def test_compaction_advances_phase_start_idx(self, fake_home):
-        """After compaction, _phase_start_idx_global points to the user
-        message that triggers the NEXT phase. The leading user trigger of
-        the just-compacted phase is preserved outside the compact block so
-        history keeps alternating roles."""
-        llm = _make_llm([
-            _tool_use_response("t1", "pose_correction", {
-                "x_preset": "MMD", "source_armature": "Body", "target_armature": "MHWs",
-            }),
-            _text_response("Phase 1 done."),
-            _text_response("ok."),
-        ])
-        loop = AgentLoop(
-            llm=llm, blender=_make_blender(), session_id="sess_idx",
-        )
-        loop.state = LoopState.RUNNING_PHASE
-        loop._phase_idx = _PHASE_SEQUENCE.index("phase_1")
-        loop._phase_start_idx_global = 0
-        from app.phases.pose_correction import PoseCorrection
-        with patch.object(PoseCorrection, "run", return_value=PhaseResult.ok({})):
-            await loop.step("go")
-            await loop.step("continue")
-        # Post-compaction layout: [user "go", asst compacted, user "continue", asst "ok."]
-        # _phase_start_idx_global points at the user "continue" trigger (idx 2).
-        assert loop._phase_start_idx_global == 2
-        assert loop._global_history[0]["role"] == "user"
-        assert loop._global_history[1]["role"] == "assistant"
-        assert loop._global_history[2]["role"] == "user"
-
-    async def test_history_alternates_roles_across_two_compactions(self, fake_home):
-        """Regression: two successive phase compactions must not produce
-        consecutive assistant blocks. Was broken — the leading user msg of
-        each phase got absorbed into its compact summary, so by the second
-        compaction history started with `[asst compacted, asst compacted, …]`
-        and the next llm.chat 400'd."""
-        llm = _make_llm([
-            # Turn 1: tool, wrap-up
-            _tool_use_response("t1", "pose_correction", {
-                "x_preset": "MMD", "source_armature": "Body", "target_armature": "MHWs",
-            }),
-            _text_response("Phase 1 done."),
-            # Turn 2: tool (phase_2), wrap-up
-            _tool_use_response("t2", "skeleton_align", {}),
-            _text_response("Phase 2 done."),
-            # Turn 3: text only
-            _text_response("ready for phase 3."),
-        ])
-        loop = AgentLoop(
-            llm=llm, blender=_make_blender(), session_id="sess_alt",
-        )
-        loop.state = LoopState.RUNNING_PHASE
-        loop._phase_idx = _PHASE_SEQUENCE.index("phase_1")
-        loop._phase_start_idx_global = 0
-        from app.phases.pose_correction import PoseCorrection
-        from app.phases.skeleton_align import SkeletonAlign
-        with patch.object(PoseCorrection, "run", return_value=PhaseResult.ok({})), \
-             patch.object(SkeletonAlign, "run", return_value=PhaseResult.ok({})):
-            await loop.step("run phase 1")
-            await loop.step("run phase 2")
-            await loop.step("continue")
-        # Anthropic invariant: first message is user, and no two consecutive
-        # messages share the same role.
-        roles = [m["role"] for m in loop._global_history]
-        assert roles[0] == "user", f"history must start with user, got {roles}"
-        for i in range(len(roles) - 1):
-            assert roles[i] != roles[i + 1], (
-                f"consecutive same-role messages at index {i}: {roles}"
-            )
-        # Both phase summaries are present.
-        compact_blocks = [
-            m for m in loop._global_history
-            if isinstance(m.get("content"), str) and COMPACT_MARKER in m["content"]
-        ]
-        assert len(compact_blocks) == 2
+        assert loop._phase_idx == _PHASE_SEQUENCE.index("phase_2")
 
 
 # ── interrupt logging ────────────────────────────────────────────────────────
@@ -341,21 +223,20 @@ class TestInterruptLogging:
 
 @pytest.mark.unit
 class TestSessionRecovery:
-    """Recovery shape (deliberate, phase-granular):
+    """PR6 simplified recovery to `_phase_idx` only — per-phase loops
+    operate on isolated `_phase_history` built from their phase prompts,
+    so a session-level replay is no longer needed. `query_history` reads
+    the move log directly when the LLM wants to recall past phase work.
 
+    The remaining contract:
       - Cold-start AgentLoop for a session_id whose moves.jsonl exists →
-        _phase_idx = count of phase_advance moves, _global_history rebuilt
-        as N [compacted] summaries (one per completed phase, using the
-        wrap-up text logged after each advance).
-      - Partial mid-phase work is NOT re-injected. Scene-is-memory handles it
-        (next turn, the agent re-queries Blender). Past decisions are
-        recoverable via `query_history`.
+        `_phase_idx` = count of `phase_advance` moves.
+      - Mid-phase work (tool moves without a following `phase_advance`)
+        leaves `_phase_idx` unchanged.
+      - Move log persists turn numbering across restarts.
     """
 
     def _seed_log(self, sid: str, moves: list[dict]) -> None:
-        """Write moves directly to a session's jsonl, bypassing MoveLog so the
-        test fully controls the on-disk content (including pre-existing
-        ts/turn fields)."""
         log = MoveLog(sid)
         for m in moves:
             log.append(m)
@@ -365,155 +246,52 @@ class TestSessionRecovery:
             llm=MagicMock(), blender=_make_blender(), session_id="brand_new",
         )
         assert loop._phase_idx == 0
-        assert loop._global_history == []
-        assert loop._phase_start_idx_global == 0
-        assert loop._just_completed_phase is None
 
-    def test_single_phase_advance_hydrates_one_compacted_summary(self, fake_home):
+    def test_single_phase_advance_restores_phase_idx(self, fake_home):
         sid = "resume_one"
         self._seed_log(sid, [
             {"kind": "user", "phase": "setup_import_source", "content": "start"},
-            {"kind": "tool", "phase": "setup_import_source",
-             "name": "setup_import_source", "args": {}, "result_summary": "ok",
-             "success": True},
             {"kind": "phase_advance", "phase": "setup_import_source",
              "to_phase": "setup_validate"},
-            # The wrap-up assistant message lands AFTER phase_idx already moved,
-            # so its phase field is the NEW phase (matches live wiring).
-            {"kind": "assistant", "phase": "setup_validate",
-             "content": "Source FBX imported successfully — Source armature is ready."},
         ])
         loop = AgentLoop(
             llm=MagicMock(), blender=_make_blender(), session_id=sid,
         )
         assert loop._phase_idx == 1
-        # Hydration emits a (user trigger, assistant compacted) PAIR so the
-        # rebuilt history alternates roles — required for the next LLM call.
-        assert len(loop._global_history) == 2
-        user_msg, asst_msg = loop._global_history
-        assert user_msg["role"] == "user"
-        assert user_msg["content"] == "start"
-        assert asst_msg["role"] == "assistant"
-        assert isinstance(asst_msg["content"], str)
-        assert COMPACT_MARKER in asst_msg["content"]
-        assert "Source FBX imported" in asst_msg["content"]
-        assert loop._phase_start_idx_global == 2
 
-    def test_multiple_phase_advances_each_get_a_summary(self, fake_home):
+    def test_multiple_phase_advances_sum_into_phase_idx(self, fake_home):
         sid = "resume_many"
         self._seed_log(sid, [
-            {"kind": "tool", "phase": "setup_import_source", "name": "x",
-             "args": {}, "result_summary": "ok", "success": True},
             {"kind": "phase_advance", "phase": "setup_import_source",
              "to_phase": "setup_validate"},
-            {"kind": "assistant", "phase": "setup_validate",
-             "content": "Import done."},
-            {"kind": "tool", "phase": "setup_validate", "name": "y",
-             "args": {}, "result_summary": "ok", "success": True},
             {"kind": "phase_advance", "phase": "setup_validate",
              "to_phase": "setup_infer"},
-            {"kind": "assistant", "phase": "setup_infer",
-             "content": "Scene validated."},
-            {"kind": "tool", "phase": "setup_infer", "name": "z",
-             "args": {}, "result_summary": "MMD detected", "success": True},
             {"kind": "phase_advance", "phase": "setup_infer",
              "to_phase": "setup_import"},
-            {"kind": "assistant", "phase": "setup_import",
-             "content": "Model inferred as MMD."},
         ])
         loop = AgentLoop(
             llm=MagicMock(), blender=_make_blender(), session_id=sid,
         )
         assert loop._phase_idx == 3
-        # One [compacted] summary per phase_advance, each paired with a user
-        # trigger so history alternates roles.
-        compacted = [
-            m for m in loop._global_history
-            if isinstance(m.get("content"), str) and COMPACT_MARKER in m["content"]
-        ]
-        assert len(compacted) == 3
-        # Order preserved.
-        assert "Import done" in compacted[0]["content"]
-        assert "Scene validated" in compacted[1]["content"]
-        assert "Model inferred" in compacted[2]["content"]
-        # 3 phases × (user trigger + assistant summary) = 6 messages.
-        assert len(loop._global_history) == 6
-        roles = [m["role"] for m in loop._global_history]
-        assert roles == ["user", "assistant", "user", "assistant", "user", "assistant"]
-        assert loop._phase_start_idx_global == 6
 
-    def test_phase_advance_without_following_wrap_up_uses_fallback(self, fake_home):
-        """Edge case: backend crash between phase_advance and the wrap-up
-        assistant move getting logged. Hydration should still complete with
-        a generic summary placeholder instead of silently dropping the
-        phase from the count. With no logged user msg either, the user half
-        of the pair falls back to a synthetic '(continue)' so role
-        alternation still holds."""
-        sid = "resume_partial"
-        self._seed_log(sid, [
-            {"kind": "tool", "phase": "setup_import_source", "name": "x",
-             "args": {}, "result_summary": "ok", "success": True},
-            {"kind": "phase_advance", "phase": "setup_import_source",
-             "to_phase": "setup_validate"},
-            # No assistant move after — simulate the crash.
-        ])
-        loop = AgentLoop(
-            llm=MagicMock(), blender=_make_blender(), session_id=sid,
-        )
-        assert loop._phase_idx == 1
-        assert len(loop._global_history) == 2
-        assert loop._global_history[0]["role"] == "user"
-        assert loop._global_history[0]["content"] == "(continue)"
-        assert loop._global_history[1]["role"] == "assistant"
-        assert COMPACT_MARKER in loop._global_history[1]["content"]
-
-    def test_hydrated_history_alternates_roles(self, fake_home):
-        """Regression: a multi-phase recovery must produce history that the
-        Anthropic API will accept — first message role 'user', no two
-        consecutive messages with the same role."""
-        sid = "resume_alt"
-        self._seed_log(sid, [
-            {"kind": "user", "phase": "setup_import_source", "content": "start"},
-            {"kind": "phase_advance", "phase": "setup_import_source",
-             "to_phase": "setup_validate"},
-            {"kind": "assistant", "phase": "setup_validate", "content": "Imported."},
-            {"kind": "user", "phase": "setup_validate", "content": "next"},
-            {"kind": "phase_advance", "phase": "setup_validate",
-             "to_phase": "setup_infer"},
-            {"kind": "assistant", "phase": "setup_infer", "content": "Validated."},
-        ])
-        loop = AgentLoop(
-            llm=MagicMock(), blender=_make_blender(), session_id=sid,
-        )
-        roles = [m["role"] for m in loop._global_history]
-        assert roles[0] == "user", f"first message must be user, got {roles}"
-        for i in range(len(roles) - 1):
-            assert roles[i] != roles[i + 1], (
-                f"consecutive same-role messages at index {i}: {roles}"
-            )
-
-    def test_mid_phase_work_not_replayed_into_history(self, fake_home):
-        """Crash mid-phase (tool moves but no phase_advance yet) → the agent
-        resumes at the SAME phase it was in, but the partial tool detail
-        is not re-injected. Scene-is-memory + query_history handle recovery."""
+    def test_mid_phase_work_does_not_advance_phase_idx(self, fake_home):
+        """Crash mid-phase (tool moves but no phase_advance) → resume at the
+        SAME phase. Scene-is-memory + `query_history` handle recovery; we
+        don't replay tool blocks into the prompt."""
         sid = "resume_mid"
         self._seed_log(sid, [
             {"kind": "user", "phase": "phase_1", "content": "go"},
             {"kind": "tool", "phase": "phase_1", "name": "scene_info",
              "args": {}, "result_summary": "...", "success": True},
-            # No phase_advance — we're still mid-phase_1.
         ])
         loop = AgentLoop(
             llm=MagicMock(), blender=_make_blender(), session_id=sid,
         )
-        # No phase_advance moves recorded.
         assert loop._phase_idx == 0
-        # No compacted summaries injected.
-        assert loop._global_history == []
 
     def test_turn_counter_resumes_from_existing_log(self, fake_home):
-        """A resumed session's MoveLog should continue numbering from where
-        the prior session left off, so the log stays monotonically ordered."""
+        """A resumed session's MoveLog continues numbering from where the
+        prior session left off — the log stays monotonically ordered."""
         sid = "resume_turns"
         self._seed_log(sid, [
             {"kind": "user", "content": "first"},
@@ -525,7 +303,6 @@ class TestSessionRecovery:
         )
         loop._move_log.append({"kind": "user", "content": "after resume"})
         all_moves = loop._move_log.read()
-        # Pre-existing 3 + new 1 = 4 total, monotonic turns.
         assert [m["turn"] for m in all_moves] == [1, 2, 3, 4]
 
 
@@ -540,11 +317,10 @@ class TestFullyCompletedSessionRecovery:
     recovery flipped to RUNNING_PHASE, the LLM picked a phase tool, and the
     success branch IndexErrored on `_PHASE_SEQUENCE[self._phase_idx]`.
 
-    Upstream's fix (commit 77a90e4) is to treat the completed-session case
-    as 'start fresh': hydration writes a `session_completed` marker to the
-    log, resets `_phase_idx = 0`, and clears `_global_history`. The user's
-    next message starts a brand-new mod run against the same session_id.
-    These tests pin that contract.
+    Upstream's fix is to treat the completed-session case as 'start fresh':
+    hydration writes a `session_completed` marker to the log and resets
+    `_phase_idx = 0`. The user's next message starts a brand-new mod run
+    against the same session_id. These tests pin that contract.
     """
 
     def _seed_full_pipeline(self, sid: str) -> None:
@@ -570,7 +346,6 @@ class TestFullyCompletedSessionRecovery:
         )
         # Upstream contract: completed session becomes a fresh start.
         assert loop._phase_idx == 0
-        assert loop._global_history == []
         assert loop.state == LoopState.IDLE
         # A `session_completed` marker is appended so the status endpoint
         # can report the prior session's terminal state to the FE.
@@ -587,17 +362,9 @@ class TestFullyCompletedSessionRecovery:
 @pytest.mark.asyncio
 class TestSkipPathContextManagement:
     """The ERROR_HANDLING → skip path used to short-circuit two context
-    bookkeeping steps that the success path performs:
-
-      1. It did not write a `phase_advance` move to the move log → resumed
-         sessions undercounted phases and replayed work the user already
-         skipped past.
-      2. It did not set `_just_completed_phase` → the failed tool's
-         tool_use/tool_result and assistant error reply lingered in
-         `_global_history` for the rest of the session, growing prompt cost
-         every turn.
-
-    Both are now fixed alongside the role-alternation work."""
+    bookkeeping step that the success path performs: it did not write a
+    `phase_advance` move to the move log → resumed sessions undercounted
+    phases and replayed work the user already skipped past. Now fixed."""
 
     async def test_skip_logs_phase_advance_with_skipped_flag(self, fake_home):
         from app.phases.base import PhaseError
@@ -619,55 +386,6 @@ class TestSkipPathContextManagement:
         assert pa_moves[0]["to_phase"] == "phase_2"
         assert pa_moves[0].get("skipped") is True
 
-    async def test_skip_queues_compaction_so_next_turn_collapses_failure(self, fake_home):
-        """After skipping a failed phase, the next user turn should collapse
-        the failed tool's blocks + error reply + skip warning into one
-        compact summary instead of carrying them forward."""
-        from app.phases.base import PhaseError
-        llm = _make_llm([_text_response("acknowledged.")])
-        loop = AgentLoop(
-            llm=llm, blender=_make_blender(), session_id="sess_skip_compact",
-        )
-        loop._phase_idx = _PHASE_SEQUENCE.index("phase_1")
-        # Simulate the in-prompt residue of a failed phase: a user trigger,
-        # the assistant tool_use, the failed tool_result, the assistant
-        # error reply. This mirrors the real shape immediately before the
-        # user picks [Skip].
-        loop._global_history = [
-            {"role": "user", "content": "run phase 1"},
-            {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "t1", "name": "pose_correction", "input": {}},
-            ]},
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "t1", "content": "boom"},
-            ]},
-            {"role": "assistant", "content": "[FAIL] pose_correction: boom\n[Retry][Skip][Ask]"},
-        ]
-        loop._phase_start_idx_global = 0
-        loop.state = LoopState.ERROR_HANDLING
-        loop._pending_error = PhaseError(
-            category="unexpected", operator="pose_correction",
-            message="boom", raw="trace",
-        )
-        with patch.object(loop._error_handler, "parse_user_choice", return_value="skip"):
-            await loop.step("skip")
-        # The skip handler must have queued compaction.
-        assert loop._just_completed_phase == "phase_1"
-        # Next user turn should fire compaction.
-        await loop.step("continue")
-        compact_blocks = [
-            m for m in loop._global_history
-            if isinstance(m.get("content"), str) and COMPACT_MARKER in m["content"]
-        ]
-        assert len(compact_blocks) == 1, (
-            f"failed phase residue not compacted: {loop._global_history}"
-        )
-        roles = [m["role"] for m in loop._global_history]
-        assert roles[0] == "user"
-        for i in range(len(roles) - 1):
-            assert roles[i] != roles[i + 1], (
-                f"consecutive same-role messages at index {i}: {roles}"
-            )
 
 
 # ── query_history tool ───────────────────────────────────────────────────────
@@ -702,8 +420,10 @@ class TestQueryHistoryToolExecution:
         log_seeder(loop._move_log)
         loop.state = LoopState.RUNNING_PHASE
         await loop.step("query")
+        # PR6: every phase uses its own isolated `_phase_history`; the
+        # façade proxy hands back whichever loop is active.
         tool_results = [
-            block for msg in loop._global_history
+            block for msg in loop._phase_history
             if msg["role"] == "user" and isinstance(msg["content"], list)
             for block in msg["content"]
             if isinstance(block, dict) and block.get("type") == "tool_result"
@@ -781,9 +501,10 @@ class TestQueryHistoryToolExecution:
         await loop.step("what tools ran before?")
         # Find the query_history tool_use in history — its tool_result should
         # contain the two tool moves we seeded (kind=tool filter).
+        # PR2: setup phases write to isolated phase_history; scan both.
         tool_results = [
             block
-            for msg in loop._global_history
+            for msg in loop._phase_history
             if msg["role"] == "user" and isinstance(msg["content"], list)
             for block in msg["content"]
             if isinstance(block, dict) and block.get("type") == "tool_result"

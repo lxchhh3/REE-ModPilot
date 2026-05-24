@@ -1,23 +1,13 @@
 """
-Unit tests for `app/agent/history.py` — the context-management layer for
-long modding sessions.
+Unit tests for `app/agent/history.py` — the off-prompt move log for long
+modding sessions.
 
-Two pieces under test:
-
-  MoveLog                    — per-session JSON-lines write/read of every
-                               "move" (user msg / agent msg / tool call /
-                               phase advance / widget confirm / error choice
-                               / interrupt). Lives off-prompt at
-                               `~/.modpilot/sessions/{sid}/moves.jsonl`.
-  compact_phase_range        — pure function that collapses a phase's
-                               tool_use/tool_result/narration messages in
-                               `_global_history` down to a single summary
-                               assistant message. The on-disk MoveLog remains
-                               the ground truth for what was compacted away.
-
-Both are designed so the LLM never re-reads verbose phase detail unless it
-explicitly calls the `query_history` meta-tool, whose schema lives in the
-same module.
+  MoveLog       — per-session JSON-lines write/read of every "move" (user msg
+                  / agent msg / tool call / phase advance / widget confirm /
+                  error choice / interrupt). Lives off-prompt at
+                  `~/.modpilot/sessions/{sid}/moves.jsonl`. The LLM accesses
+                  past moves via the `query_history` meta-tool whose schema
+                  lives in the same module.
 
 Run with: uv run pytest -m unit tests/unit/test_history.py -v
 """
@@ -30,11 +20,9 @@ from pathlib import Path
 import pytest
 
 from app.agent.history import (
-    COMPACT_MARKER,
     QUERY_HISTORY_TOOL_NAME,
     QUERY_HISTORY_TOOL_SCHEMA,
     MoveLog,
-    compact_phase_range,
 )
 
 # ── MoveLog ──────────────────────────────────────────────────────────────────
@@ -181,94 +169,13 @@ class TestMoveLogRead:
         assert moves[1]["content"] == "still ok"
 
 
-# ── compact_phase_range ──────────────────────────────────────────────────────
-
-
-def _build_phase_history() -> list[dict]:
-    """Synthetic _global_history slice covering one phase boundary.
-
-    Index 0:   user opens session
-    Index 1:   assistant intro
-    Index 2:   user "go"
-    Index 3:   assistant tool_use(pose_correction)
-    Index 4:   user tool_result for index 3
-    Index 5:   assistant wrap-up text "phase 1 done"
-    """
-    return [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "Ready."},
-        {"role": "user", "content": "go"},
-        {"role": "assistant", "content": [
-            {"type": "text", "text": "running phase 1"},
-            {"type": "tool_use", "id": "t1", "name": "pose_correction",
-             "input": {"x_preset": "MMD"}},
-        ]},
-        {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "t1",
-             "content": "Phase phase_1 completed. Scene diff: ..."},
-        ]},
-        {"role": "assistant", "content": "Phase 1 done — pose corrected via MMD preset."},
-    ]
-
-
-@pytest.mark.unit
-class TestCompactPhaseRange:
-    def test_replaces_span_with_single_summary_message(self):
-        history = _build_phase_history()
-        new = compact_phase_range(history, start_idx=3, end_idx=6,
-                                   summary="Phase 1 done — pose corrected.")
-        # 3 messages removed, 1 summary appended in their place.
-        assert len(new) == len(history) - 2
-        # Pre-span messages untouched.
-        assert new[:3] == history[:3]
-        # Compact marker present so future calls can detect already-compacted spans.
-        assert new[3]["role"] == "assistant"
-        assert isinstance(new[3]["content"], str)
-        assert COMPACT_MARKER in new[3]["content"]
-        assert "Phase 1 done" in new[3]["content"]
-
-    def test_empty_range_is_noop(self):
-        history = _build_phase_history()
-        new = compact_phase_range(history, start_idx=3, end_idx=3, summary="x")
-        assert new == history
-
-    def test_out_of_bounds_indices_return_copy_unchanged(self):
-        history = _build_phase_history()
-        new = compact_phase_range(history, start_idx=99, end_idx=100, summary="x")
-        assert new == history
-        # Must be a copy — the caller should be free to mutate.
-        assert new is not history
-
-    def test_idempotent_on_already_compacted_span(self):
-        """Compacting a span that is itself a single compact-marker message is
-        a no-op. Prevents double-compaction wiping the summary."""
-        history = _build_phase_history()
-        once = compact_phase_range(history, 3, 6, "summary one")
-        twice = compact_phase_range(once, 3, 4, "summary two")
-        assert twice == once
-
-    def test_preserves_messages_after_span(self):
-        """When compaction happens mid-history (e.g. multiple phases buffered
-        before flush), messages AFTER the span are preserved."""
-        history = _build_phase_history() + [
-            {"role": "user", "content": "now phase 2"},
-            {"role": "assistant", "content": "ok"},
-        ]
-        new = compact_phase_range(history, 3, 6, "phase 1 collapsed")
-        assert new[-2:] == history[-2:]
-        assert COMPACT_MARKER in new[-3]["content"]
-
-
-# ── query_history tool schema ────────────────────────────────────────────────
-
-
 # ── system prompt injection ──────────────────────────────────────────────────
 
 
 @pytest.mark.unit
 class TestContextManagementProtocolInjection:
-    """The system prompt must teach the LLM that older detail is compacted but
-    recoverable via `query_history`. Without this section the LLM has no
+    """The system prompt must teach the LLM that older detail is off-prompt
+    but recoverable via `query_history`. Without this section the LLM has no
     reason to reach for the tool and will keep asking the user for things
     it has already been told."""
 
@@ -282,13 +189,6 @@ class TestContextManagementProtocolInjection:
         from app.agent.history import QUERY_HISTORY_TOOL_NAME
         sysp = build_system_prompt()
         assert QUERY_HISTORY_TOOL_NAME in sysp
-
-    def test_protocol_mentions_the_compact_marker(self):
-        """The LLM must know the visible marker so it can recognize a
-        compacted span when reading its own history."""
-        from app.agent.prompts import build_system_prompt
-        sysp = build_system_prompt()
-        assert COMPACT_MARKER in sysp
 
 
 @pytest.mark.unit

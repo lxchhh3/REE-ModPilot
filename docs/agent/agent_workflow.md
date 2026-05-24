@@ -140,6 +140,9 @@ the same turn even if you try.
         ↓  (physics chain list)
 [4B Physics File Creation]             — NEGOTIATING loop
         ↓
+[4C Body Colliders]                    — NEGOTIATING loop
+  collider_create (sub-step) → propose masks → collider_apply
+        ↓
 [5  Material Processing]               — NEGOTIATING loop (non-MMD only)
         ↓
 [6  Batch Export]                      — includes automatic RE Mesh Tools cleanup
@@ -822,6 +825,113 @@ After a preset is applied, the user may request fine-tuning. Translate as follow
 
 ### Common Errors
 > 详见 docs/dev/troubleshooting.md
+
+---
+
+## Phase 4C: Body Colliders
+
+**Goal**: Materialise the MHWilds full-body collider preset (capsules/spheres
+CHILD_OF-constrained to body bones) and write per-chain-group `clspFlags0` /
+`clspFlags1` collision masks. Without this phase the chain groups carry the
+default `-1` mask but the scene has no collider objects, so physics simulation
+either ignores collisions entirely or behaves erratically.
+
+### Entry Conditions
+- [ ] Phase 4B completed — chain header / settings / groups exist in the chain collection.
+- [ ] Wilds Chain Editor add-on installed (provides `re_chain.create_full_body_clsp`).
+
+### Execution Steps
+
+**Step 1 — `collider_create` (sub-step, does NOT advance phase)**
+
+Calls `bpy.ops.re_chain.create_full_body_clsp()`. The operator imports the
+add-on's bundled `full_body.clsp.3` preset, creates one collider object per
+MHWilds body bone (Hip / Spine_0..2 / arms / legs / head), and attaches a
+CHILD_OF constraint to each so the colliders follow the bones during
+animation. Colliders are placed in a sibling `Chain Clsps - <name>.clsp`
+collection.
+
+Returns `state_diff["collider_info"]`:
+```json
+{
+  "colliders": [{"name": "...", "bone": "Spine_0", "type": "CAPSULE"}, ...],
+  "chain_groups": [
+    {"name": "CHAIN_GROUP_0", "parent_bone": "Hair_001",
+     "clspFlags0": -1, "clspFlags1": 0},
+    ...
+  ],
+  "clsp_collection": "Chain Clsps - MHWilds_Female.clsp"
+}
+```
+
+**If the operator is missing** (`MISSING_OP` precondition error): tell the
+user to install the Wilds Chain Editor add-on. Do NOT try to bundle our own
+collider preset — the add-on owns this surface.
+
+**Step 2 — Propose flag masks (LLM in chat, no tool call)**
+
+Bit layout (from `app/data/clsp_body_bits.json`):
+
+| Hex value | Key | Region |
+|-----------|-----|--------|
+| 0x00001 | hip        | Hip |
+| 0x00002 | spine_0    | Spine 0 |
+| 0x00004 | spine_1    | Spine 1 |
+| 0x00008 | spine_2    | Spine 2 |
+| 0x00010 | neck_l_arm | Neck → L Upper Arm |
+| 0x00020 | neck_r_arm | Neck → R Upper Arm |
+| 0x00040 | l_upperarm | L Upper → Forearm |
+| 0x00080 | r_upperarm | R Upper → Forearm |
+| 0x00100 | l_forearm  | L Forearm → Hand |
+| 0x00200 | r_forearm  | R Forearm → Hand |
+| 0x00400 | l_hand     | L Hand → Fingers |
+| 0x00800 | r_hand     | R Hand → Fingers |
+| 0x01000 | neck_head  | Neck → Head |
+| 0x02000 | head       | Head |
+| 0x04000 | l_thigh    | L Thigh → Knee |
+| 0x08000 | r_thigh    | R Thigh → Knee |
+| 0x10000 | l_shin     | L Shin → Foot |
+| 0x20000 | r_shin     | R Shin → Foot |
+| 0x40000 | l_foot     | L Foot → Toe |
+| 0x80000 | r_foot     | R Foot → Toe |
+
+Runtime collision test: `(chainGroup.clspFlags0 & collider.clspBitFlag0) != 0`.
+
+**Default = 0 (no collisions)**. Only OR in body parts where a collision is
+clearly desirable for that chain's TYPE and ROOT BONE. Heuristics from
+recurring MHWilds setups:
+
+| Chain type / origin | Suggested mask | Reasoning |
+|---------------------|----------------|-----------|
+| Long hair from head | `spine_0 \| spine_1 \| spine_2` (`0x0000E`) | Prevent hair tunnelling through torso. Upper-arm collisions cause flailing — skip. |
+| Short hair / pony tail | `0` | Default to no collisions; tweak later if needed. |
+| Cape / shoulder cloth | upper body + both arms (`spine_0..2 \| arms`) | Lets arm motion push the cape correctly. |
+| Skirt / lower-body cloth | both thighs + both shins (`l_thigh \| r_thigh \| l_shin \| r_shin` = `0x3C000`) | Legs are the only thing it should collide with. |
+| Ribbons / charms / loose accessories | `0` | Conservative default — only enable if user reports clipping. |
+| Anything ambiguous | `0` | Better to add collisions later than to chase phantom flailing. |
+
+Present the proposal in chat as a JSON block keyed by chain-group name and
+ask the user to confirm or adjust before calling Step 3. Use `parent_bone`
+from Step 1's result to make the per-chain reasoning explicit.
+
+**Step 3 — `collider_apply` (advances phase to Phase 5)**
+
+Inputs: `{"chain_flags": {"CHAIN_GROUP_0": 0x0000E, "CHAIN_GROUP_1": {"clspFlags0": 0x3C000, "clspFlags1": 0}, ...}}`
+
+- Int shorthand sets `clspFlags0` and leaves `clspFlags1` at 0.
+- Dict form sets both halves explicitly.
+- Unknown chain-group names are reported in `state_diff["not_found"]` but do
+  not fail the phase — partial application is informative for typos.
+
+### Exit Conditions
+- `Chain Clsps - <name>.clsp` collection exists with one collider per body bone.
+- Every chain group carries an explicit (possibly zero) `clspFlags0`.
+- User has confirmed the masks before Step 3 ran.
+
+### Common Errors
+- `MISSING_OP:re_chain.create_full_body_clsp` — Wilds Chain Editor not installed.
+- `CANCELLED:...` — operator failed; usually no active armature in pose mode
+  or a naming collision with a pre-existing clsp collection.
 
 ---
 

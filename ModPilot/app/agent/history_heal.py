@@ -1,7 +1,8 @@
 """Defensive normaliser for Anthropic tool_use / tool_result pairing.
 
-Sits between `AgentLoop._global_history` and every `llm.chat()` call so a
-malformed message sequence never hits the API.  Pure, in-place, idempotent.
+Sits between each per-phase loop's `_phase_history` and every `llm.chat()`
+call so a malformed message sequence never hits the API.  Pure, in-place,
+idempotent.
 
 Extracted from `app.agent.loop` so the heuristics can be tested and reasoned
 about in isolation — the loop itself is busy enough.

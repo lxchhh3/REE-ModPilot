@@ -18,6 +18,7 @@ const PHASE_GROUP: Record<PhaseName, string> = {
   phase_35: 'mid',
   phase_4a: 'phys',
   phase_4b: 'phys',
+  phase_4c: 'phys',
   phase_5: 'mat',
   phase_6: 'exp',
 };

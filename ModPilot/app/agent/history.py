@@ -1,31 +1,22 @@
 """
 Context-management layer for long modding sessions.
 
-A full mod session walks 12+ phases and easily runs 30+ turns. Each turn
-re-sends the entire `_global_history` to the LLM, so verbose phase detail
-(tool_use/tool_result/narration) compounds into token cost, latency, and
-eventually context exhaustion on smaller models.
-
-This module provides two cooperating mechanisms:
+A full mod session walks 12+ phases and easily runs 30+ turns. Each per-phase
+PhaseLoop runs in an isolated `_phase_history` thread, so verbose
+tool_use/tool_result/narration from earlier phases never re-enters a later
+phase's prompt. The MoveLog below is the off-prompt source of truth that
+the LLM can page through on demand via the `query_history` meta-tool.
 
   MoveLog
     Append-only JSON-Lines log at `~/.modpilot/sessions/{sid}/moves.jsonl`,
     storing every meaningful event (user msg, agent reply, tool call,
-    phase advance, widget confirm, error choice, interrupt). The log
-    lives OFF-PROMPT — the LLM never sees it unconditionally; it is the
-    ground truth that survives compaction and serves as a session-recovery
-    artifact across backend restarts.
-
-  compact_phase_range
-    Pure function that collapses a span of `_global_history` (the messages
-    belonging to a just-completed phase) into a single assistant summary
-    message marked with COMPACT_MARKER. The MoveLog still holds the full
-    detail; the LLM can recover it via the `query_history` meta-tool.
+    phase advance, widget confirm, error choice, interrupt). Serves as
+    the session-recovery artifact across backend restarts.
 
   query_history meta-tool
-    Schema-only here; the executor lives in `AgentLoop._execute_tool_call`
-    (alongside the `sync_phase_state` meta-tool). Lets the LLM page through
-    its own past on demand instead of being forced to re-process all of it
+    Schema-only here; the executor lives in `PhaseLoop._execute_tool_call`
+    (alongside the `sync_phase_state` meta-tool). Lets the LLM retrieve
+    older detail on demand instead of being forced to re-process all of it
     every turn.
 
 Design philosophy: ModPilot's existing rule is "the Blender scene IS the
@@ -41,17 +32,6 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-
-# ── compaction marker ────────────────────────────────────────────────────────
-
-#: Prefix tag prepended to every synthetic summary message produced by
-#: `compact_phase_range`. Used for two things:
-#:   1. Idempotency: re-compacting an already-compacted span is a no-op.
-#:   2. Future debug / UI surfacing: a chat log inspector can filter or
-#:      style compaction summaries differently from raw model output.
-#: The marker is intentionally human-readable so model output containing
-#: this exact string is vanishingly unlikely to false-positive.
-COMPACT_MARKER: str = "[compacted]"
 
 
 # ── MoveLog ──────────────────────────────────────────────────────────────────
@@ -174,49 +154,6 @@ class MoveLog:
                 return sum(1 for line in f if line.strip())
         except OSError:
             return 0
-
-
-# ── compact_phase_range ──────────────────────────────────────────────────────
-
-
-def compact_phase_range(
-    history: list[dict[str, Any]],
-    start_idx: int,
-    end_idx: int,
-    summary: str,
-) -> list[dict[str, Any]]:
-    """Collapse `history[start_idx:end_idx]` into a single assistant summary.
-
-    Returns a NEW list; does not mutate the input. The caller swaps its
-    `_global_history` reference for the returned list.
-
-    Idempotency: if the span is already a single message whose string
-    content begins with COMPACT_MARKER, the input is returned (as a copy).
-    This guards against double-compaction in error/retry paths.
-
-    Safety: the caller is responsible for ensuring the span contains only
-    matched tool_use ↔ tool_result pairs. Compacting a span that orphans
-    a tool_use will cause the next LLM call to 400. In practice the natural
-    boundaries (phase entry → wrap-up) satisfy this — phase advance only
-    fires after `_execute_tool_call` returns success, which means the
-    tool_result has already been appended.
-    """
-    if start_idx < 0 or end_idx > len(history) or start_idx >= end_idx:
-        return list(history)
-
-    span = history[start_idx:end_idx]
-
-    # Already compacted? bail.
-    if len(span) == 1:
-        content = span[0].get("content")
-        if isinstance(content, str) and content.startswith(COMPACT_MARKER):
-            return list(history)
-
-    summary_msg: dict[str, Any] = {
-        "role": "assistant",
-        "content": f"{COMPACT_MARKER} {summary}",
-    }
-    return [*history[:start_idx], summary_msg, *history[end_idx:]]
 
 
 # ── query_history meta-tool schema ───────────────────────────────────────────

@@ -17,6 +17,7 @@ export const PHASE_SEQUENCE = [
   'phase_35',
   'phase_4a',
   'phase_4b',
+  'phase_4c',
   'phase_5',
   'phase_6',
 ] as const;
@@ -34,6 +35,7 @@ export const PHASE_LABELS: Record<PhaseName, { short: string; long: string }> = 
   phase_35: { short: '3.5', long: 'phase_35' },
   phase_4a: { short: '4a', long: 'phase_4a: Physics A' },
   phase_4b: { short: '4b', long: 'phase_4b: Physics B' },
+  phase_4c: { short: '4c', long: 'phase_4c: Body Colliders' },
   phase_5: { short: '5', long: 'phase_5: Materials' },
   phase_6: { short: '6', long: 'phase_6: Export' },
 };

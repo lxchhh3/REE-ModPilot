@@ -101,9 +101,12 @@ def test_widget_classification_packages_confirmations_and_calls_step(monkeypatch
         assert r.json() == {"saved": True, "count": 2}
 
         loop = app.state.agent_sessions[sid]
-        user_msgs = [m["content"] for m in loop._global_history if m["role"] == "user"]
-        assert user_msgs, "loop.step never appended a user message"
-        last = user_msgs[-1]
+        # PR6: per-phase isolation — widget messages are logged through MoveLog
+        # (the canonical persistent log) with kind="widget". Read from there
+        # rather than poking at any specific phase's in-memory history.
+        widget_moves = loop._move_log.read(kind="widget")
+        assert widget_moves, "loop.step never logged a widget user message"
+        last = widget_moves[-1]["content"]
         assert last.startswith("[CONFIRMED_CLASSIFICATIONS] ")
         body = json.loads(last[len("[CONFIRMED_CLASSIFICATIONS] "):])
         assert body == {
@@ -198,8 +201,9 @@ def test_widget_material_packages_nested_mapping(monkeypatch):
         assert r.json() == {"saved": True, "materials": 2}
 
         loop = app.state.agent_sessions[sid]
-        user_msgs = [m["content"] for m in loop._global_history if m["role"] == "user"]
-        last = user_msgs[-1]
+        widget_moves = loop._move_log.read(kind="widget")
+        assert widget_moves
+        last = widget_moves[-1]["content"]
         assert last.startswith("[CONFIRMED_MATERIAL_MAPPING] ")
         body = json.loads(last[len("[CONFIRMED_MATERIAL_MAPPING] "):])
         assert body == {
@@ -237,7 +241,7 @@ def test_widget_material_drops_invalid_slots_but_preserves_user_clears(monkeypat
         )
         assert r.status_code == 200
         loop = app.state.agent_sessions[sid]
-        last = [m["content"] for m in loop._global_history if m["role"] == "user"][-1]
+        last = loop._move_log.read(kind="widget")[-1]["content"]
         body = json.loads(last[len("[CONFIRMED_MATERIAL_MAPPING] "):])
         # Bogus slot dropped; Normal preserved with empty path (user cleared it).
         assert body == {"body_mat": {"Base Color": "C:/tex/ok.png", "Normal": ""}}

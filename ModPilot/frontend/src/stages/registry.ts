@@ -22,6 +22,7 @@ export const STAGE_REGISTRY: Partial<Record<PhaseName, ComponentType<StageProps>
   phase_35: Phase4Stage,
   phase_4a: Phase4Stage,
   phase_4b: Phase4Stage,
+  phase_4c: Phase4Stage,
   phase_5: Phase5Stage,
   phase_6: Phase6Stage,
 };

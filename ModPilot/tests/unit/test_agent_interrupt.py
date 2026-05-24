@@ -145,7 +145,10 @@ async def test_interrupt_during_first_round_bails_after_tools_drained():
     # tool_result blocks cover every tool_use id.  (step() also appends a
     # plain-text assistant reply after the bail-out, so we can't just look at
     # the tail.)
-    history = loop._global_history
+    # PR6: each phase has its own isolated `_phase_history`; tool_use /
+    # tool_result blocks land there only. The façade proxy on the active
+    # loop is sufficient.
+    history = loop._phase_history
     asst_idx = None
     for i, msg in enumerate(history):
         if msg["role"] == "assistant" and isinstance(msg["content"], list):

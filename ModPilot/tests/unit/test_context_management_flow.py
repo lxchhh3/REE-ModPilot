@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.agent.history import COMPACT_MARKER, MoveLog
+from app.agent.history import MoveLog
 from app.agent.loop import _PHASE_SEQUENCE, AgentLoop, LoopState
 from app.phases.base import PhaseResult
 
@@ -89,35 +89,43 @@ def _patch_phase_tool(phase_idx: int):
 
 def _snapshot(label: str, loop: AgentLoop) -> dict:
     """Compact snapshot of the loop's externally-visible state. Returned as
-    a dict so the assert-on-shape test paths can use it; also printed
-    inline so `-s` runs read like a story."""
-    roles = [m["role"] for m in loop._global_history]
+    a dict so the assert-on-shape test paths can use it; also printed inline
+    so `-s` runs read like a story.
+
+    PR6: there is no longer a shared session-level history to dump; each
+    phase owns its own `_phase_history`. The snapshot tracks the active
+    loop's history length as a rough liveness signal.
+    """
+    active = loop._phase_loop
+    active_history_len = len(active._phase_history) if active is not None else 0
     snap = {
         "label": label,
         "phase_idx": loop._phase_idx,
         "current_phase": loop.current_phase,
         "state": loop.state.value,
-        "history_len": len(loop._global_history),
-        "roles": roles,
-        "compact_count": sum(
-            1 for m in loop._global_history
-            if isinstance(m.get("content"), str) and COMPACT_MARKER in m["content"]
-        ),
+        "active_history_len": active_history_len,
     }
     print(
         f"\n  [{label}] phase_idx={snap['phase_idx']} "
         f"current_phase={snap['current_phase']} state={snap['state']} "
-        f"len(history)={snap['history_len']} roles={roles} "
-        f"compacted={snap['compact_count']}"
+        f"active_history_len={active_history_len}"
     )
     return snap
 
 
-def _assert_well_formed(roles: list[str]) -> None:
-    """Anthropic-acceptable shape: first message is user, no two consecutive
-    messages share the same role. Run this anywhere the history is about
-    to be handed to the LLM."""
-    assert roles, "history must not be empty"
+def _assert_active_history_well_formed(loop: AgentLoop) -> None:
+    """Anthropic-acceptable shape for the ACTIVE per-phase loop's history:
+    first message is user, no two consecutive messages share the same role.
+
+    Per-phase histories are seeded with a (user, assistant) brief pair on
+    first entry and grow by alternating mirror appends, so they should
+    always satisfy this. Useful as a regression guard if dispatch's mirror
+    logic regresses.
+    """
+    active = loop._phase_loop
+    if active is None or not active._phase_history:
+        return
+    roles = [m["role"] for m in active._phase_history]
     assert roles[0] == "user", f"first message must be user, got {roles}"
     for i in range(len(roles) - 1):
         assert roles[i] != roles[i + 1], (
@@ -132,10 +140,10 @@ def _assert_well_formed(roles: list[str]) -> None:
 @pytest.mark.asyncio
 async def test_multi_phase_flow_with_restart(fake_home):
     """Cold session → advance 2 phases → tear down → rehydrate from disk →
-    advance a 3rd phase. At every llm.chat boundary the in-memory history
-    must satisfy the Anthropic invariants (`_assert_well_formed`), and
-    the on-disk move log must accumulate the expected phase_advance
-    moves across the restart."""
+    advance a 3rd phase. At every llm.chat boundary the active per-phase
+    loop's history must satisfy the Anthropic alternation invariant, and
+    the on-disk move log must accumulate the expected phase_advance moves
+    across the restart."""
     sid = "flow_multi_phase"
 
     # ── stage 1: cold start, run phase 0 then phase 1 ───────────────────
@@ -154,15 +162,13 @@ async def test_multi_phase_flow_with_restart(fake_home):
         await loop.step("start the import")
     snap = _snapshot("after phase 0", loop)
     assert snap["phase_idx"] == 1
-    _assert_well_formed(snap["roles"])
+    _assert_active_history_well_formed(loop)
 
     with _patch_phase_tool(1):
         await loop.step("continue")
     snap = _snapshot("after phase 1", loop)
     assert snap["phase_idx"] == 2
-    # Phase 0's verbose blocks should be compacted; phase 1's still live.
-    assert snap["compact_count"] == 1, "phase 0 should be the only compacted block yet"
-    _assert_well_formed(snap["roles"])
+    _assert_active_history_well_formed(loop)
 
     # ── stage 2: tear down, rebuild from disk, advance phase 2 ───────────
     # Same session_id → AgentLoop construction triggers _hydrate_from_move_log.
@@ -174,17 +180,16 @@ async def test_multi_phase_flow_with_restart(fake_home):
     ])
     loop2 = AgentLoop(llm=llm2, blender=_make_blender(), session_id=sid)
     snap = _snapshot("after restart (pre-step)", loop2)
-    # Hydration must replay the 2 prior phase_advances as user/asst pairs.
+    # PR6: hydration restores only _phase_idx; per-phase loops are built
+    # lazily on first activation (so active_history_len stays 0 until step).
     assert snap["phase_idx"] == 2, "hydration must preserve advance count"
     assert snap["state"] == "idle", "post-hydration state is IDLE until a step fires"
-    assert snap["compact_count"] == 2, "both prior phases come back as compacted summaries"
-    _assert_well_formed(snap["roles"])
 
     with _patch_phase_tool(2):
         await loop2.step("next phase")
     snap = _snapshot("after phase 2 (post-restart)", loop2)
     assert snap["phase_idx"] == 3
-    _assert_well_formed(snap["roles"])
+    _assert_active_history_well_formed(loop2)
 
     # On-disk log must show 3 phase_advance moves total (2 pre-restart + 1
     # post-restart). This is the load-bearing check for "the session is
@@ -208,8 +213,8 @@ def test_fully_completed_session_resets_on_recovery(fake_home):
 
     Upstream's fix is stronger than a state restore: hydration treats a
     completed session as 'start fresh' — writes a `session_completed`
-    marker, resets `_phase_idx = 0`, and clears `_global_history`. This
-    test pins that contract from the flow harness."""
+    marker and resets `_phase_idx = 0`. This test pins that contract from
+    the flow harness."""
     sid = "flow_full_pipeline"
 
     log = MoveLog(sid)
@@ -231,7 +236,9 @@ def test_fully_completed_session_resets_on_recovery(fake_home):
     # Upstream contract: completed session becomes a fresh start.
     assert snap["phase_idx"] == 0
     assert snap["state"] == "idle"
-    assert snap["history_len"] == 0
     assert snap["current_phase"] == _PHASE_SEQUENCE[0]
+    # Per-phase loop is built lazily on first step(); active_history_len is 0
+    # immediately after hydration even for a fresh start (no seed yet).
+    assert snap["active_history_len"] == 0
     markers = loop._move_log.read(kind="session_completed")
     assert len(markers) == 1, "session_completed marker should land on disk"

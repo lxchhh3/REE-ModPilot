@@ -21,6 +21,7 @@ try:
 except ImportError:  # pragma: no cover
     TestClient = None  # type: ignore
 
+from app.agent.state import LoopState
 from app.blender.client import BlenderClient
 from app.blender.preset_catalog import PresetMeta
 from app.llm.client import LLMClient
@@ -178,29 +179,37 @@ def test_session_config_rejects_unknown_preset(monkeypatch, tmp_path):
 # ── AgentLoop emits model_type_inferred ───────────────────────────────────
 
 
+def _fresh_loop_for_setup_infer():
+    """Build an AgentLoop with a mock LLM + mock Blender, sitting on phase
+    `setup_infer`. Used by the inspector-hook tests below.
+
+    Pre-PR6 these tests bypassed __init__ (`AgentLoop.__new__(AgentLoop)`)
+    and reached into `_emit_widget_if_inspector` directly. After the
+    AgentLoop façade collapsed to `AgentLoop = RouterLoop`, that path
+    required Router carrying test-only attribute-bypass plumbing —
+    constructing a real loop with mocked deps and forwarding the call
+    through the active per-phase PhaseLoop is cleaner.
+    """
+    from app.agent.loop import AgentLoop, _PHASE_SEQUENCE
+
+    blender = MagicMock()
+    blender.get_scene_info.return_value = {"name": "Scene", "object_count": 0}
+
+    events: list[dict] = []
+    loop = AgentLoop(llm=MagicMock(), blender=blender, event_sink=events.append)
+    loop._phase_idx = _PHASE_SEQUENCE.index("setup_infer")
+    loop.state = LoopState.RUNNING_PHASE
+    loop._select_active_phase_loop()
+    return loop, events
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_emit_widget_if_inspector_emits_model_type_inferred():
     """Direct unit test of the inspector hook: a state_diff carrying an
     `inferred_preset` + `decision` should produce a `model_type_inferred`
-    event without touching Blender or the LLM.
-
-    Issue #11 made the hook async (so the material branch can `await` the LLM
-    pre-fill call). This test now awaits the coroutine.
-    """
-    from app.agent.loop import AgentLoop
-
-    events: list[dict] = []
-
-    loop = AgentLoop.__new__(AgentLoop)  # bypass __init__ — only exercising one method
-    loop._event_sink = lambda e: events.append(e)
-    loop.state = MagicMock()
-    loop.state.value = "running_phase"
-    # current_phase is a property over _PHASE_SEQUENCE[_phase_idx]; setting
-    # _phase_idx=1 makes current_phase resolve to "setup_infer" (the slot
-    # we inserted in Wave 2).
-    loop._phase_idx = 1
-
+    event without touching Blender or the LLM."""
+    loop, events = _fresh_loop_for_setup_infer()
     state_diff = {
         "inferred_preset": "MMD",
         "coverage": 1.0,
@@ -221,15 +230,7 @@ async def test_emit_widget_if_inspector_emits_model_type_inferred():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_emit_widget_skips_when_state_diff_missing_keys():
-    from app.agent.loop import AgentLoop
-
-    events: list[dict] = []
-    loop = AgentLoop.__new__(AgentLoop)
-    loop._event_sink = lambda e: events.append(e)
-    loop.state = MagicMock()
-    loop.state.value = "running_phase"
-    loop._phase_idx = 1
-
+    loop, events = _fresh_loop_for_setup_infer()
     # No inferred_preset → don't emit.
     await loop._emit_widget_if_inspector("setup_infer_model_type", {"coverage": 0.5})
     assert not any(e["type"] == "model_type_inferred" for e in events)

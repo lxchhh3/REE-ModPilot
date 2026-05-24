@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "bits": {
+    "hip":        { "bit": 1,       "label": "Hip" },
+    "spine_0":    { "bit": 2,       "label": "Spine 0" },
+    "spine_1":    { "bit": 4,       "label": "Spine 1" },
+    "spine_2":    { "bit": 8,       "label": "Spine 2" },
+    "neck_l_arm": { "bit": 16,      "label": "Neck->L Arm" },
+    "neck_r_arm": { "bit": 32,      "label": "Neck->R Arm" },
+    "l_upperarm": { "bit": 64,      "label": "L Upper->Fore" },
+    "r_upperarm": { "bit": 128,     "label": "R Upper->Fore" },
+    "l_forearm":  { "bit": 256,     "label": "L Fore->Hand" },
+    "r_forearm":  { "bit": 512,     "label": "R Fore->Hand" },
+    "l_hand":     { "bit": 1024,    "label": "L Hand->Finger" },
+    "r_hand":     { "bit": 2048,    "label": "R Hand->Finger" },
+    "neck_head":  { "bit": 4096,    "label": "Neck->Head" },
+    "head":       { "bit": 8192,    "label": "Head" },
+    "l_thigh":    { "bit": 16384,   "label": "L Thigh->Knee" },
+    "r_thigh":    { "bit": 32768,   "label": "R Thigh->Knee" },
+    "l_shin":     { "bit": 65536,   "label": "L Shin->Foot" },
+    "r_shin":     { "bit": 131072,  "label": "R Shin->Foot" },
+    "l_foot":     { "bit": 262144,  "label": "L Foot->Toe" },
+    "r_foot":     { "bit": 524288,  "label": "R Foot->Toe" }
+  }
+}

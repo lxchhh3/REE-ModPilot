@@ -20,12 +20,11 @@ _WORKFLOW_TEXT: str = _WORKFLOW_PATH.read_text(encoding="utf-8")
 
 _CONTEXT_MANAGEMENT_PROTOCOL: str = (
     "## Context Management Protocol\n"
-    "After each phase completes, the verbose tool_use / tool_result / narration "
-    "messages from that phase are collapsed in your visible chat history to a "
-    "single summary message marked `[compacted]`. The full record (every tool "
-    "call with its arguments and result, every user reply, every widget "
-    "confirmation, every error choice, every interrupt) is preserved off-prompt "
-    "in the session's move log on disk.\n"
+    "Each phase runs in its own isolated conversation thread. You will not see "
+    "tool calls, narration, or widget confirmations from earlier phases in your "
+    "visible history. The full record (every tool call with its arguments and "
+    "result, every user reply, every widget confirmation, every error choice, "
+    "every interrupt) is preserved off-prompt in the session's move log on disk.\n"
     "\n"
     "When you need detail older than the current phase — for example, the exact "
     "`inferred_types` you confirmed in Phase 4A while now wiring Phase 4B, or "
@@ -105,8 +104,47 @@ _PHASE_HEADER_MAP: dict[str, str] = {
     "phase_35": "Phase 3.5: Physics Bone Transplant",
     "phase_4a": "Phase 4A: Physics Bone Classification",
     "phase_4b": "Phase 4B: Physics File Creation",
+    "phase_4c": "Phase 4C: Body Colliders",
     "phase_5": "Phase 5: Material Processing",
     "phase_6": "Phase 6: Batch Export",
+}
+
+
+# Ordered list of (section_key, workflow.md header substring) used by
+# `build_system_prompt(include_section_keys=...)` to compose the prompt out
+# of a chosen subset of phase sections. Keys here are coarser-grained than
+# `_PHASE_HEADER_MAP` (which maps individual phase identifiers) because some
+# workflow.md sections cover multiple phases (e.g. "Phase 1–3: Preprocessing
+# Block" hosts phase_1/2/3 together). Per-phase PhaseLoop instances pick the
+# subset relevant to their phase via this map.
+_WORKFLOW_SECTIONS: list[tuple[str, str]] = [
+    ("setup", "Setup Phase"),
+    ("phase_1_3", "Phase 1–3: Preprocessing Block"),
+    ("phase_35", "Phase 3.5: Physics Bone Transplant"),
+    ("phase_4a", "Phase 4A: Physics Bone Classification"),
+    ("phase_4b", "Phase 4B: Physics File Creation"),
+    ("phase_4c", "Phase 4C: Body Colliders"),
+    ("phase_5", "Phase 5: Material Processing"),
+    ("phase_6", "Phase 6: Batch Export"),
+]
+
+#: Section keys used by `_PHASE_SEQUENCE` slots to find the right workflow
+#: section for a per-phase PhaseLoop's system prompt. Multiple slots may map
+#: to the same section (Phase 1/2/3 all live under "phase_1_3").
+PHASE_TO_SECTION_KEY: dict[str, str] = {
+    "setup_import_source": "setup",
+    "setup_validate":      "setup",
+    "setup_infer":         "setup",
+    "setup_import":        "setup",
+    "phase_1":             "phase_1_3",
+    "phase_2":             "phase_1_3",
+    "phase_3":             "phase_1_3",
+    "phase_35":            "phase_35",
+    "phase_4a":            "phase_4a",
+    "phase_4b":            "phase_4b",
+    "phase_4c":            "phase_4c",
+    "phase_5":             "phase_5",
+    "phase_6":             "phase_6",
 }
 
 
@@ -199,39 +237,45 @@ def _render_session_config_block(cfg: dict) -> str:
 def build_system_prompt(
     physics_presets: dict | None = None,
     session_config: dict | None = None,
+    include_section_keys: set[str] | None = None,
 ) -> str:
     """
-    Build the session-level system prompt (injected once at AgentLoop init).
+    Build the session-level system prompt.
 
-    Includes: agent identity statement, Global Behavior Rules, Phase Sequence
-    diagram, and the full workflow for all phases (1-3 preprocessing block plus
-    Phase 3.5/4A/4B/5/6).  Including all phases unconditionally ensures the
-    agent has complete workflow context even in resume scenarios where _phase_idx
-    has not advanced to the current phase (e.g. prior phases were done manually
-    in a previous session).  Per-phase injection in _run_react_turn still runs
-    as a reminder but is no longer the primary context source for later phases.
+    The prompt is split into a stable kernel (identity, language rule,
+    protocols, global rules, phase sequence) plus a configurable selection
+    of phase workflow sections (Setup / Phase 1–3 / Phase 3.5 / Phase 4A/B/C /
+    Phase 5 / Phase 6). The kernel is always included.
 
-    physics_presets are appended inline when provided (E19).
-    session_config (issue #3) is appended as a final "Pre-collected parameters"
-    section so the LLM doesn't need to ask the user for paths / names / toggles
-    already supplied via the config form.
+    `include_section_keys` selects which phase workflow sections to append.
+    Keys come from `_WORKFLOW_SECTIONS` (e.g. "setup", "phase_1_3",
+    "phase_4a"). When None (default), every section is included — preserving
+    the original AgentLoop behavior before the hierarchical refactor.
+
+    Hierarchical loop usage (PR2+):
+      - Per-phase PhaseLoop spawns pass a single-key set, e.g.
+        `{"setup"}` for a setup PhaseLoop or `{"phase_4a"}` for the Phase 4A
+        loop, so each LLM call sees only the workflow text for its phase.
+      - The "legacy generic" PhaseLoop (hosting phases not yet migrated)
+        passes the set of non-migrated section keys.
+
+    `physics_presets` are appended inline when provided (E19).
+    `session_config` (issue #3) is appended as a final "Pre-collected
+    parameters" section so the LLM doesn't need to ask the user for paths /
+    names / toggles already supplied via the config form.
     """
+    if include_section_keys is None:
+        section_keys = {key for key, _ in _WORKFLOW_SECTIONS}
+    else:
+        section_keys = include_section_keys
+
+    # Kernel — always included.
     global_rules = _extract_section(_WORKFLOW_TEXT, "Global Behavior Rules")
     assessment_protocol = _extract_section(_WORKFLOW_TEXT, "Pipeline State Assessment Protocol")
-    # Issue #15: pause-between-phases rule.  Paired with the AgentLoop rail
+    # Issue #15: pause-between-phases rule. Paired with the AgentLoop rail
     # that breaks the tool-call loop after a phase-advancing tool succeeds.
     transition_protocol = _extract_section(_WORKFLOW_TEXT, "Phase Transition Protocol")
     phase_seq = _extract_section(_WORKFLOW_TEXT, "Phase Sequence")
-    # Issue #4: Setup Phase now contains the model-type inference step
-    # (#4/#5/#6); inject it so the LLM knows about the new step 1.5 and
-    # the supplement/custom flows.
-    setup_phase = _extract_section(_WORKFLOW_TEXT, "Setup Phase")
-    preprocessing = _extract_section(_WORKFLOW_TEXT, "Phase 1–3: Preprocessing Block")
-    phase_35 = _extract_section(_WORKFLOW_TEXT, "Phase 3.5: Physics Bone Transplant")
-    phase_4a = _extract_section(_WORKFLOW_TEXT, "Phase 4A: Physics Bone Classification")
-    phase_4b = _extract_section(_WORKFLOW_TEXT, "Phase 4B: Physics File Creation")
-    phase_5 = _extract_section(_WORKFLOW_TEXT, "Phase 5: Material Processing")
-    phase_6 = _extract_section(_WORKFLOW_TEXT, "Phase 6: Batch Export")
 
     parts = [
         "You are ModPilot, an AI agent that automates MHWs (Monster Hunter Wilds) "
@@ -256,21 +300,14 @@ def build_system_prompt(
         global_rules,
         "",
         phase_seq,
-        "",
-        setup_phase,
-        "",
-        preprocessing,
-        "",
-        phase_35,
-        "",
-        phase_4a,
-        "",
-        phase_4b,
-        "",
-        phase_5,
-        "",
-        phase_6,
     ]
+
+    # Phase workflow sections — emitted in canonical order (matches the
+    # original concatenation, just filtered by section_keys).
+    for key, header in _WORKFLOW_SECTIONS:
+        if key not in section_keys:
+            continue
+        parts += ["", _extract_section(_WORKFLOW_TEXT, header)]
 
     if physics_presets:
         parts += [
