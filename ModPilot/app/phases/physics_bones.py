@@ -851,6 +851,12 @@ class PhysicsChains(PhaseTool):
             # Step 5 — angle limit ramp on all new chain groups (default 60°, 4 iter)
             self._apply_angle_limit_ramp(client, chain_col_name)
 
+            # Step 6 — tune RE_CHAIN_HEADER to MHWilds calibrated values (issue #21).
+            # RE Chain Editor's defaults are generic; MHWs ships with stricter
+            # physics-engine settings that affect calculation precision and
+            # collision search.
+            self._tune_chain_header_to_mhwilds(client, chain_col_name)
+
         except BlenderError as exc:
             return PhaseResult.fail(
                 PhaseError(
@@ -1486,6 +1492,10 @@ class PhysicsChains(PhaseTool):
         # Best-effort: angle limit ramp
         if col_name:
             self._apply_angle_limit_ramp(client, col_name)
+            # The header was created by auto_create_chains BEFORE the socket
+            # drop, so it exists and must carry the MHWilds calibration just
+            # like the happy path (issue #21).
+            self._tune_chain_header_to_mhwilds(client, col_name)
 
         return {
             "chain_settings_created": all_cs,
@@ -1845,6 +1855,73 @@ class PhysicsChains(PhaseTool):
         )
         try:
             client.execute_and_extract(code, timeout=120)
+        except Exception:
+            pass  # non-fatal
+
+    def _tune_chain_header_to_mhwilds(
+        self,
+        client: BlenderClient,
+        chain_col_name: str,
+    ) -> None:
+        """
+        Override RE_CHAIN_HEADER defaults with MHWilds-calibrated values (issue #21).
+
+        RE Chain Editor's create_chain_header writes generic defaults; MHWs ships
+        with stricter physics-engine settings. The header object is looked up via
+        the active chain collection (no hardcoded name).
+
+        Fields tuned (RE_CHAIN_HEADER.re_chain_header):
+          calculateMode           '1' (Performance)     → '3' (Quality)
+          chainAttrFlags          '0' (None)            → '4' (UNKN4)
+          calculateStepTime        1.0                  →  2.0
+          modelCollisionSearch     0 (False)            →  1 (True)
+          highFPSCalculateMode    '1'                   → '2' (VariableStepTime)
+          wilds_unkn1              0                    →  1
+          wilds_unkn2              0                    →  1
+
+        Non-fatal: any failure (header not found, attribute missing on older
+        toolkit builds) is swallowed and the phase still returns success.
+        """
+        if not chain_col_name:
+            return
+        code = (
+            f"import bpy\n"
+            f"col = bpy.data.collections.get({chain_col_name!r})\n"
+            f"if col is None:\n"
+            f"    print({BLENDER_SENTINEL!r})\n"
+            f"    print('SKIP:collection_not_found')\n"
+            f"else:\n"
+            f"    col_obj_names = {{o.name for o in col.all_objects}}\n"
+            f"    header_obj = next(\n"
+            f"        (o for o in bpy.data.objects\n"
+            f"         if o.get('TYPE') == 'RE_CHAIN_HEADER' and o.name in col_obj_names),\n"
+            f"        None,\n"
+            f"    )\n"
+            f"    if header_obj is None:\n"
+            f"        print({BLENDER_SENTINEL!r})\n"
+            f"        print('SKIP:header_not_found')\n"
+            f"    else:\n"
+            f"        header = header_obj.re_chain_header\n"
+            f"        skipped = []\n"
+            # Enum fields use identifier strings; numeric fields plain values.
+            f"        for attr, val in (\n"
+            f"            ('calculateMode', '3'),\n"
+            f"            ('chainAttrFlags', '4'),\n"
+            f"            ('calculateStepTime', 2.0),\n"
+            f"            ('modelCollisionSearch', 1),\n"
+            f"            ('highFPSCalculateMode', '2'),\n"
+            f"            ('wilds_unkn1', 1),\n"
+            f"            ('wilds_unkn2', 1),\n"
+            f"        ):\n"
+            f"            try:\n"
+            f"                setattr(header, attr, val)\n"
+            f"            except (AttributeError, TypeError, ValueError):\n"
+            f"                skipped.append(attr)\n"
+            f"        print({BLENDER_SENTINEL!r})\n"
+            f"        print('TUNED:' + header_obj.name + ':' + ','.join(skipped))\n"
+        )
+        try:
+            client.execute_and_extract(code, timeout=60)
         except Exception:
             pass  # non-fatal
 

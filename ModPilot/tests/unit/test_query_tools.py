@@ -195,7 +195,9 @@ class TestListCollections:
         client = _make_client([json.dumps([])])
         self.tool.run(client, {"chain_only": True})
         code = client.execute_and_extract.call_args[0][0]
-        assert "true" in code  # json.dumps(True) → 'true'
+        # ListCollections now inlines the flag as a Python literal (`chain_only = True`)
+        # rather than JSON, so the marker to look for is the literal.
+        assert "chain_only = True" in code
 
     def test_exception_returns_error_json(self):
         client = MagicMock()

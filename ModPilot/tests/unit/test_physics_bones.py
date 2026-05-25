@@ -329,10 +329,12 @@ class TestPhysicsChains:
 
     def test_successful_pipeline_returns_ok(self):
         new_cs = ["RE_CHAIN_CHAINSETTINGS_0"]
-        # Responses (SEPARATE mode): validate, create, apply, angle_ramp
+        # Responses (SEPARATE mode):
+        #   validate, verify_marks, create, apply, angle_ramp
         client = MagicMock()
         client.execute_and_extract.side_effect = [
             ["OK"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             [f"NEW_CS:{json.dumps({'new_cs': new_cs, 'col': 'MHWilds_Female.chain2'})}"],
             [f"APPLIED:{json.dumps([])}"],
             ["RAMP:{'FINISHED'}"],
@@ -349,14 +351,16 @@ class TestPhysicsChains:
         assert result.success
         assert result.state_diff["chain_settings_created"] == new_cs
 
-    def test_prepare_only_marks_clean_first_attempt(self):
-        """prepare_only=True: cleanup + verify clean on first attempt."""
+    def test_prepare_only_cleanup_succeeds_and_defers_verification(self):
+        """prepare_only=True: validate + clear_and_refresh; verification is
+        DEFERRED to the chain-creation branch (per the in-code note at
+        physics_bones.py:657-668 — verifying here false-positives on bones
+        that haven't yet been merged)."""
         client = MagicMock()
-        # Responses: validate, clear_and_refresh, verify(clean)
+        # Responses: validate, clear_and_refresh
         client.execute_and_extract.side_effect = [
             ["OK"],
             ["OK"],
-            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
         ]
         result = self.tool.run(
             client,
@@ -368,67 +372,24 @@ class TestPhysicsChains:
             },
         )
         assert result.success
-        assert result.state_diff.get("marks_clean") is True
-        assert "verified clean" in result.state_diff["message"].lower()
-        # validate + clear + verify — no chain creation
-        assert client.execute_and_extract.call_count == 3
+        # No 'marks_clean' key — verification was deferred, not performed.
+        assert "marks_clean" not in result.state_diff
+        # Message advertises the deferral so the LLM/user knows to expect a
+        # later verification pass in the chain-creation step.
+        msg = result.state_diff["message"].lower()
+        assert "deferred" in msg
+        # Only validate + clear — no verify call in prepare_only.
+        assert client.execute_and_extract.call_count == 2
 
-    def test_prepare_only_marks_dirty_retries_and_succeeds(self):
-        """prepare_only=True: first verify dirty → auto-retry → second verify clean."""
+    def test_prepare_only_clear_failure_propagates(self):
+        """If clear_and_refresh fails (e.g. operator raises), prepare_only
+        fails fast and does NOT touch downstream steps."""
         client = MagicMock()
-        dirty = f"VERIFY:{json.dumps({'clean': False, 'suspicious': ['Spine']})}"
-        clean = f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"
-        # Responses: validate, clear1, verify(dirty), clear2, verify(clean)
+        # validate ok, then clear_and_refresh signals operator failure.
         client.execute_and_extract.side_effect = [
             ["OK"],
-            ["OK"],
-            [dirty],
-            ["OK"],
-            [clean],
+            ["CLEAR_ERR:clear_chain_role exploded"],
         ]
-        result = self.tool.run(
-            client,
-            _make_cache(),
-            {
-                "target_armature": "MHWs",
-                "inferred_types": {},
-                "prepare_only": True,
-            },
-        )
-        assert result.success
-        assert result.state_diff.get("marks_clean") is True
-        assert client.execute_and_extract.call_count == 5
-
-    def test_prepare_only_marks_dirty_both_attempts_warns(self):
-        """prepare_only=True: both verify attempts fail → marks_clean=False, success with warning."""
-        client = MagicMock()
-        dirty = f"VERIFY:{json.dumps({'clean': False, 'suspicious': ['Spine']})}"
-        # Responses: validate, clear1, verify(dirty), clear2, verify(dirty)
-        client.execute_and_extract.side_effect = [
-            ["OK"],
-            ["OK"],
-            [dirty],
-            ["OK"],
-            [dirty],
-        ]
-        result = self.tool.run(
-            client,
-            _make_cache(),
-            {
-                "target_armature": "MHWs",
-                "inferred_types": {},
-                "prepare_only": True,
-            },
-        )
-        assert result.success  # warning, not hard failure
-        assert result.state_diff.get("marks_clean") is False
-        assert "warning" in result.state_diff["message"].lower()
-        assert client.execute_and_extract.call_count == 5
-
-    def test_prepare_only_armature_not_found_fails(self):
-        """prepare_only=True propagates precondition error from validate."""
-        client = MagicMock()
-        client.execute_and_extract.return_value = ["PRECONDITION:armature_not_found:MHWs"]
         result = self.tool.run(
             client,
             _make_cache(),
@@ -439,7 +400,8 @@ class TestPhysicsChains:
             },
         )
         assert not result.success
-        assert result.error.category == "precondition"
+        assert result.error.category == "operator_failed"
+        assert client.execute_and_extract.call_count == 2
 
     def test_prepare_only_armature_not_found_fails(self):
         """prepare_only=True propagates precondition error from validate."""
@@ -466,15 +428,19 @@ class TestPhysicsChains:
         """
         new_cs = ["RE_CHAIN_CHAINSETTINGS_0"]
         client = MagicMock()
-        # Responses: validate, expand_end_children, merge, clear, create, apply, angle_ramp
+        # Responses:
+        #   validate, expand_end_children, merge, clear, verify_marks,
+        #   create, apply, angle_ramp, header_tune
         client.execute_and_extract.side_effect = [
             ["OK"],
             ["EXTRAS:[]"],          # no _End children to cascade
             ["{'FINISHED'}"],
             ["{'FINISHED'}"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             [f"NEW_CS:{json.dumps({'new_cs': new_cs, 'col': 'MHWilds_Female.chain2'})}"],
             [f"APPLIED:{json.dumps([])}"],
             ["RAMP:{'FINISHED'}"],
+            [f"TUNED:HEADER_0:{json.dumps([])}"],
         ]
         result = self.tool.run(
             client,
@@ -487,8 +453,8 @@ class TestPhysicsChains:
             },
         )
         assert result.success
-        assert client.execute_and_extract.call_count == 7
-        # merge call is now index 2 (after validate + expand_end_children)
+        assert client.execute_and_extract.call_count == 9
+        # merge call is index 2 (after validate + expand_end_children)
         merge_code = client.execute_and_extract.call_args_list[2][0][0]
         assert "Ribbon_root" in merge_code
         # clear call is index 3
@@ -500,13 +466,16 @@ class TestPhysicsChains:
         """bones_to_clear works without bones_to_merge."""
         new_cs = ["RE_CHAIN_CHAINSETTINGS_0"]
         client = MagicMock()
-        # Responses: validate, clear, create, apply, angle_ramp
+        # Responses:
+        #   validate, clear, verify_marks, create, apply, angle_ramp, header_tune
         client.execute_and_extract.side_effect = [
             ["OK"],
             ["{'FINISHED'}"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             [f"NEW_CS:{json.dumps({'new_cs': new_cs, 'col': 'MHWilds_Female.chain2'})}"],
             [f"APPLIED:{json.dumps([])}"],
             ["RAMP:{'FINISHED'}"],
+            [f"TUNED:HEADER_0:{json.dumps([])}"],
         ]
         result = self.tool.run(
             client,
@@ -518,7 +487,7 @@ class TestPhysicsChains:
             },
         )
         assert result.success
-        assert client.execute_and_extract.call_count == 5
+        assert client.execute_and_extract.call_count == 7
 
     def test_bones_to_clear_failure_stops_pipeline(self):
         """If clear_chain_role fails, phase fails without calling _create_chains."""
@@ -544,14 +513,17 @@ class TestPhysicsChains:
         new_cs = ["RE_CHAIN_CHAINSETTINGS_0"]
         client = MagicMock()
         # Responses (SEPARATE mode):
-        #   validate, expand_end_children, merge, create, apply, angle_ramp
+        #   validate, expand_end_children, merge, verify_marks, create,
+        #   apply, angle_ramp, header_tune
         client.execute_and_extract.side_effect = [
             ["OK"],
             ["EXTRAS:[]"],
             ["{'FINISHED'}"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             [f"NEW_CS:{json.dumps({'new_cs': new_cs, 'col': 'MHWilds_Female.chain2'})}"],
             [f"APPLIED:{json.dumps([])}"],
             ["RAMP:{'FINISHED'}"],
+            [f"TUNED:HEADER_0:{json.dumps([])}"],
         ]
         result = self.tool.run(
             client,
@@ -563,7 +535,7 @@ class TestPhysicsChains:
             },
         )
         assert result.success
-        assert client.execute_and_extract.call_count == 6
+        assert client.execute_and_extract.call_count == 8
         # Merge call is now index 2 (after validate + expand_end_children).
         merge_code = client.execute_and_extract.call_args_list[2][0][0]
         assert "Ribbon_root" in merge_code
@@ -577,11 +549,13 @@ class TestPhysicsChains:
         """
         new_cs = ["RE_CHAIN_CHAINSETTINGS_0"]
         client = MagicMock()
-        # validate → expand returns one extra _End child → merge → create → apply → ramp
+        # validate → expand returns one extra _End child → merge → verify_marks
+        # → create → apply → ramp
         client.execute_and_extract.side_effect = [
             ["OK"],
             ['EXTRAS:["Twist wrist_L_End"]'],
             ["{'FINISHED'}"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             [f"NEW_CS:{json.dumps({'new_cs': new_cs, 'col': 'MHWilds_Female.chain2'})}"],
             [f"APPLIED:{json.dumps([])}"],
             ["RAMP:{'FINISHED'}"],
@@ -609,10 +583,13 @@ class TestPhysicsChains:
         from app.blender.client import BlenderError
         new_cs = ["RE_CHAIN_CHAINSETTINGS_0"]
         client = MagicMock()
+        # validate → expand (throws) → merge → verify_marks → create →
+        # apply → ramp
         client.execute_and_extract.side_effect = [
             ["OK"],
             BlenderError("blender went bonk"),  # expand step throws
             ["{'FINISHED'}"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             [f"NEW_CS:{json.dumps({'new_cs': new_cs, 'col': 'MHWilds_Female.chain2'})}"],
             [f"APPLIED:{json.dumps([])}"],
             ["RAMP:{'FINISHED'}"],
@@ -657,9 +634,11 @@ class TestPhysicsChains:
     def test_skipped_params_recorded_in_state_diff(self):
         skipped = ["RE_CHAIN_CHAINSETTINGS_0.motionForce"]
         client = MagicMock()
-        # Responses (SEPARATE mode): validate, create, apply (with skips), angle_ramp
+        # Responses (SEPARATE mode):
+        #   validate, verify_marks, create, apply (with skips), angle_ramp
         client.execute_and_extract.side_effect = [
             ["OK"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             [f"NEW_CS:{json.dumps({'new_cs': ['RE_CHAIN_CHAINSETTINGS_0'], 'col': 'MHWilds_Female.chain2'})}"],
             [f"APPLIED:{json.dumps(skipped)}"],
             ["RAMP:{'FINISHED'}"],
@@ -696,8 +675,10 @@ class TestPhysicsChains:
 
     def test_cancelled_operator_returns_operator_failed(self):
         client = MagicMock()
+        # validate, verify_marks, create (cancelled)
         client.execute_and_extract.side_effect = [
             ["OK"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
             ["CANCELLED:{'CANCELLED'}"],
         ]
         result = self.tool.run(
@@ -802,6 +783,70 @@ class TestPhysicsChains:
         )
         call_args = client.execute_and_extract.call_args[0][0]
         assert "Character_Chain.cfil" in call_args
+
+    # ── _tune_chain_header_to_mhwilds (issue #21) ────────────────────────────
+
+    def test_tune_header_emits_all_seven_calibrated_fields(self):
+        """Step 6 (issue #21) overrides the 7 RE_CHAIN_HEADER fields MHWs needs."""
+        tool = PhysicsChains()
+        client = _make_client([f"TUNED:HEADER_0:{json.dumps([])}"])
+        tool._tune_chain_header_to_mhwilds(client, "MHWilds_Female.chain2")
+        assert client.execute_and_extract.call_count == 1
+        code = client.execute_and_extract.call_args[0][0]
+        # Header lookup must be dynamic via the chain collection — no hardcoded name.
+        assert "RE_CHAIN_HEADER" in code
+        assert "MHWilds_Female.chain2" in code
+        # All seven MHWs-calibrated overrides (enum identifiers as str).
+        assert "('calculateMode', '3')" in code
+        assert "('chainAttrFlags', '4')" in code
+        assert "('calculateStepTime', 2.0)" in code
+        assert "('modelCollisionSearch', 1)" in code
+        assert "('highFPSCalculateMode', '2')" in code
+        assert "('wilds_unkn1', 1)" in code
+        assert "('wilds_unkn2', 1)" in code
+
+    def test_tune_header_skips_when_collection_empty(self):
+        """Empty collection name → no Blender round-trip, no error."""
+        tool = PhysicsChains()
+        client = MagicMock()
+        tool._tune_chain_header_to_mhwilds(client, "")
+        assert client.execute_and_extract.call_count == 0
+
+    def test_tune_header_swallows_exceptions(self):
+        """Helper is non-fatal: a Blender failure does not propagate."""
+        tool = PhysicsChains()
+        client = MagicMock()
+        client.execute_and_extract.side_effect = RuntimeError("socket dropped")
+        tool._tune_chain_header_to_mhwilds(client, "ChainCol")
+        assert client.execute_and_extract.call_count == 1
+
+    def test_successful_pipeline_calls_header_tune_after_angle_ramp(self):
+        """Step 6 runs after Step 5 (angle ramp) in the happy path."""
+        new_cs = ["RE_CHAIN_CHAINSETTINGS_0"]
+        client = MagicMock()
+        # Responses: validate, verify_marks, create, apply, angle_ramp, header_tune
+        client.execute_and_extract.side_effect = [
+            ["OK"],
+            [f"VERIFY:{json.dumps({'clean': True, 'suspicious': []})}"],
+            [f"NEW_CS:{json.dumps({'new_cs': new_cs, 'col': 'MHWilds_Female.chain2'})}"],
+            [f"APPLIED:{json.dumps([])}"],
+            ["RAMP:{'FINISHED'}"],
+            [f"TUNED:HEADER_0:{json.dumps([])}"],
+        ]
+        result = PhysicsChains().run(
+            client,
+            _make_cache(),
+            {
+                "target_armature": "MHWs",
+                "chain_collection": "ChainCol",
+                "inferred_types": {"hair_001": "hair_short"},
+            },
+        )
+        assert result.success
+        assert client.execute_and_extract.call_count == 6
+        tune_code = client.execute_and_extract.call_args_list[5][0][0]
+        assert "RE_CHAIN_HEADER" in tune_code
+        assert "calculateMode" in tune_code
 
 
 # ── _verify_chain_marks ───────────────────────────────────────────────────────

@@ -85,9 +85,21 @@ async def test_advancing_tool_in_running_phase_pauses_before_next_tool_round():
     events: list[dict] = []
     loop = _make_loop(sink=events, llm=llm, blender=blender)
     loop.state = LoopState.RUNNING_PHASE
+    # Phase-slot gate: align starting _phase_idx with setup_validate_scene's slot.
+    # Without this, the loop sits on phase 0 (setup_import_source) and the
+    # phase-slot filter rejects setup_validate_scene before run() is reached.
+    start_idx = _PHASE_SEQUENCE.index("setup_validate")
+    loop._phase_idx = start_idx
 
     from app.phases.setup import SetupValidateScene
-    with patch.object(SetupValidateScene, "run", return_value=PhaseResult.ok({"k": 1})):
+    # setup_validate_scene has `requires_user_pause=False` so it opts OUT of
+    # the inter-phase pause rail. Force it on for this test — the test's
+    # purpose is to verify the pause rail itself, not which tools opt in.
+    with patch.object(SetupValidateScene, "run", return_value=PhaseResult.ok({"k": 1})), \
+         patch.object(
+             SetupValidateScene, "requires_user_pause",
+             new_callable=lambda: property(lambda self: True),
+         ):
         reply = await loop.step("start")
 
     # Exactly two LLM calls: the tool-call round, then the wrap-up round.
@@ -100,7 +112,7 @@ async def test_advancing_tool_in_running_phase_pauses_before_next_tool_round():
     # Reply is the wrap-up text, not the tool result blob.
     assert reply == "✓ setup_validate done. Ready for setup_infer."
     # The phase did advance — the rail pauses, it does not block progress.
-    assert loop._phase_idx == 1
+    assert loop._phase_idx == start_idx + 1
     # State stays RUNNING_PHASE so the NEXT user turn can continue.
     assert loop.state == LoopState.RUNNING_PHASE
     # Flag is cleared so the next step() doesn't re-bail immediately.
