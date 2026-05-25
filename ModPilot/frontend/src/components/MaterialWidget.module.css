@@ -68,6 +68,18 @@
   border-left: 3px solid var(--accent);
 }
 
+.rowVision {
+  /* Distinct from .rowSuggested so users can tell at a glance which rows
+     came from pixel inspection (lower confidence) vs filename (higher). */
+  background: linear-gradient(
+    to right,
+    rgb(168 85 247 / 10%) 0,
+    rgb(168 85 247 / 10%) 4px,
+    transparent 4px
+  );
+  border-left: 3px solid rgb(168 85 247);
+}
+
 .slotName {
   display: flex;
   align-items: center;
@@ -86,6 +98,108 @@
   font-weight: 600;
 }
 
+.visionChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.7rem;
+  background: rgb(168 85 247 / 18%);
+  color: rgb(168 85 247);
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.experimentalChip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.68rem;
+  background: rgb(234 88 12 / 18%);
+  color: rgb(234 88 12);
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.experimentalBlock {
+  margin: 0.3rem 0.6rem 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px dashed rgb(234 88 12 / 35%);
+  border-radius: var(--radius-sm);
+  background: rgb(234 88 12 / 5%);
+}
+
+.experimentalHeader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.experimentalHint {
+  font-size: 0.74rem;
+  color: var(--fg-muted);
+}
+
+.experimentalGlobalHint {
+  margin-right: auto;
+  font-size: 0.76rem;
+  color: rgb(234 88 12);
+  font-weight: 500;
+}
+
+.experimentalList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.experimentalList li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+}
+
+.experimentalSlot {
+  min-width: 5rem;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+
+.experimentalFile {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.74rem;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.experimentalApplyBtn {
+  padding: 0.15rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  background: rgb(234 88 12);
+  color: #fff;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.experimentalApplyBtn:hover:not(:disabled) {
+  background: rgb(194 65 12);
+}
+
+.experimentalApplyBtn:disabled {
+  background: var(--border-strong);
+  cursor: not-allowed;
+}
+
 .table select {
   width: 100%;
   font-size: 0.8rem;
@@ -99,6 +213,8 @@
 .actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 0.6rem;
 }
 
 .submitBtn {

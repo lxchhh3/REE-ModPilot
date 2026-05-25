@@ -32,7 +32,9 @@ from typing import Any
 
 from app.blender.client import BLENDER_SENTINEL, BlenderClient, BlenderError
 from app.blender.state import SceneCache
+from app.config import settings
 from app.llm.client import LLMClient, LLMResponse, Message
+from app.llm.vision_client import VisionClient, image_to_base64, vision_available
 from app.phases.base import PhaseError, PhaseResult, PhaseTool
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -92,6 +94,133 @@ _SLOT_SUFFIX_TOKENS: dict[str, frozenset[str]] = {
 }
 
 
+# Layer 3 (vision fallback, issue #22 Stage 1). The VLM is prompted to reply
+# with one canonical PBR token; we accept common synonyms because different
+# VLMs spell the same channel differently (Qwen-VL prefers "base_color",
+# LLaVA leans toward "diffuse" or "albedo").
+#
+# alpha is listed first in the prompt because transparency maps are the most
+# common Layer 2 miss for stylized models (single-channel grayscale masks
+# that fail every filename-token rule). Spec keeps base_color/normal/etc.
+_VISION_TOKEN_TO_SLOT: dict[str, str] = {
+    # Alpha (top priority — common Layer 2 miss)
+    "alpha":      "Alpha",
+    "opacity":    "Alpha",
+    "transparency": "Alpha",
+    "mask":       "Alpha",
+    # Base Color synonyms
+    "base_color": "Base Color",
+    "basecolor":  "Base Color",
+    "diffuse":    "Base Color",
+    "albedo":     "Base Color",
+    "color":      "Base Color",
+    # Normal
+    "normal":     "Normal",
+    "normalmap":  "Normal",
+    "nrm":        "Normal",
+    # Roughness
+    "roughness":  "Roughness",
+    "gloss":      "Roughness",
+    # Metallic
+    "metallic":   "Metallic",
+    "metal":      "Metallic",
+    # Emission
+    "emission":   "Emission",
+    "emissive":   "Emission",
+    "glow":       "Emission",
+    "emit":       "Emission",
+}
+
+# Channels the VLM may legitimately return but that the Principled BSDF
+# slots can't consume directly. We RECOGNIZE them (instead of letting them
+# fall through to the "other"/garbage bucket) so a future addition of AO
+# or ORM-aware wiring only needs to map these to real slots — and so that
+# correctly classified textures aren't accidentally treated as garbage and
+# misrouted on a retry. Currently dropped, but the drop is documented.
+_VISION_KNOWN_UNMAPPED: frozenset[str] = frozenset({
+    "ao", "ambient_occlusion", "occlusion",
+    "orm", "packed_orm", "rma", "arm",
+    "specular", "spec",
+})
+
+_VISION_PROMPT: str = (
+    "What PBR texture channel is this image? Reply with EXACTLY ONE of: "
+    "alpha, base_color, normal, roughness, metallic, emission, "
+    "ao, packed_orm, other. "
+    "No prose, no punctuation."
+)
+
+# Issue #22 Stage 2 — UV-assist mesh dedup prompt for MaterialConsolidate.
+# Asks whether two materials sharing one texture actually occupy the SAME UV
+# region (= mesh dedup candidate) or just happen to reference the file (=
+# legitimately separate meshes that load the same atlas).
+_UV_OVERLAP_PROMPT_TMPL: str = (
+    "Two UV wireframes are overlaid on texture '{tex_name}': "
+    "RED is material '{mat_a}', BLUE is material '{mat_b}'. "
+    "Do these two meshes share the same texture space (occupy the same UV "
+    "regions on this texture)? Reply with EXACTLY: YES or NO, then a "
+    "confidence score between 0.0 and 1.0. "
+    "Examples: 'YES 0.9' or 'NO 0.6'. No other text."
+)
+
+
+def _find_partial_overlap_candidates(
+    groups: list[dict],
+) -> list[tuple[str, str, list[str]]]:
+    """Find material pairs across exact-match groups whose texture sets
+    overlap but aren't identical — UV-assist merge candidates.
+
+    Returns [(keeper_a, keeper_b, [shared_paths_sorted]), ...]. Groups with
+    no textures (singleton placeholders) are excluded — they can't share
+    UV space if there's no shared image to compare against.
+    """
+    annotated: list[tuple[str, frozenset[str]]] = []
+    for grp in groups:
+        tex = frozenset(grp.get("texture_set") or [])
+        if not tex:
+            continue
+        annotated.append((grp.get("keeper", ""), tex))
+
+    out: list[tuple[str, str, list[str]]] = []
+    for i in range(len(annotated)):
+        kname_a, tex_a = annotated[i]
+        for j in range(i + 1, len(annotated)):
+            kname_b, tex_b = annotated[j]
+            if tex_a == tex_b:
+                # Identical sets would already be merged by exact-match.
+                continue
+            shared = sorted(tex_a & tex_b)
+            if shared:
+                out.append((kname_a, kname_b, shared))
+    return out
+
+
+def _parse_uv_overlap_reply(text: str) -> tuple[str, float]:
+    """Normalize a VLM reply to (verdict, confidence).
+
+    Accepts 'YES 0.9', 'NO 0.5', 'YES, confidence: 0.85', plain 'YES'/'NO',
+    and falls back to ('no', 0.0) for anything unparseable. Confidence is
+    clamped to [0.0, 1.0].
+    """
+    import re
+    norm = (text or "").strip().lower()
+    if not norm:
+        return ("no", 0.0)
+    m = re.search(r"\b(yes|no)\b.*?(\d+(?:\.\d+)?)", norm)
+    if m:
+        verdict = m.group(1)
+        try:
+            conf = max(0.0, min(1.0, float(m.group(2))))
+        except ValueError:
+            conf = 0.0
+        return (verdict, conf)
+    if re.search(r"\byes\b", norm):
+        return ("yes", 0.5)
+    if re.search(r"\bno\b", norm):
+        return ("no", 0.5)
+    return ("no", 0.0)
+
+
 def _has_slot_token(path: str, slot: str) -> bool:
     """Defense-in-depth check for the suffix-token rule in the LLM prompt.
 
@@ -123,6 +252,8 @@ async def suggest_texture_mapping(
     materials: list[str],
     texture_files: list[str],
     existing_connections: dict[str, dict[str, str]],
+    *,
+    vision_marks: dict[str, list[str]] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Ask the LLM to pre-fill slot→texture suggestions for the Phase 5
     material confirmation widget (issue #11).
@@ -138,6 +269,12 @@ async def suggest_texture_mapping(
 
     Note: file_path values are full paths from texture_files; the widget
     template still resolves them against the <option value="..."> list.
+
+    Provenance (issue #22 Stage 1): pass an empty dict as `vision_marks`
+    to receive a parallel `{material_name: [slot_name, ...]}` map naming
+    the slots that came from the Layer 3 vision pass (spec calls these
+    "medium-confidence" — the widget should badge them for user review).
+    Leave `vision_marks=None` to skip provenance bookkeeping entirely.
     """
     if not texture_files or not materials:
         return {}
@@ -231,7 +368,339 @@ async def suggest_texture_mapping(
             row[slot] = path
         if row:
             clean[mat] = row
+
+    _apply_vision_fallback(
+        clean, materials, texture_files, slot_set, marks=vision_marks,
+    )
     return clean
+
+
+def _route_file_to_material(path: str, materials: list[str]) -> str | None:
+    """Pick which material an unclassified file belongs to.
+
+    Single-material models (most VRChat/MMD avatars after consolidation):
+    every unused texture must belong to the only material, regardless of
+    filename. Returning early skips the name-match heuristic entirely.
+
+    Multi-material: take the first material whose name (lowercased) appears
+    in the file stem. Returns None if no material matches — the caller
+    skips rather than guess, since misrouting wastes a VLM call AND
+    pollutes the wrong material's slots.
+    """
+    if len(materials) == 1:
+        return materials[0] or None
+    base = Path(path).stem.lower()
+    for mat in materials:
+        if mat and mat.lower() in base:
+            return mat
+    return None
+
+
+def _apply_vision_fallback(
+    clean: dict[str, dict[str, str]],
+    materials: list[str],
+    texture_files: list[str],
+    slot_set: set[str],
+    *,
+    marks: dict[str, list[str]] | None = None,
+) -> None:
+    """Issue #22 Stage 1: PBR-classify Layer-2 leftovers via a vision LLM.
+
+    Layer 2 (filename LLM + suffix-token gate) is conservative on purpose —
+    it prefers an empty slot to a wrong texture. When a vision model is
+    configured, this fallback inspects pixels of files Layer 2 didn't use
+    and fills missing slots. Bypasses `_has_slot_token` deliberately: the
+    VLM saw the actual image, which is stronger evidence than the filename.
+
+    Silent on every failure: no vision_model, no routable file, VLM raises,
+    unrecognized reply — the result is identical to Layer 2 alone. This
+    matters because the widget pre-fill is non-blocking and a broken VLM
+    must not interrupt the agent loop.
+
+    Mutates `clean` in place.
+    """
+    if not vision_available():
+        return
+
+    used: set[str] = {p for slots in clean.values() for p in slots.values()}
+    candidate_files = [f for f in texture_files if f not in used]
+    if not candidate_files:
+        return
+
+    # Pre-route every candidate so we can bail before instantiating the
+    # VisionClient when there's nothing to classify (skips network setup
+    # in the all-slots-filled case).
+    work: dict[str, list[str]] = {}
+    for fp in candidate_files:
+        mat = _route_file_to_material(fp, materials)
+        if mat is None:
+            continue
+        unfilled = slot_set - set(clean.get(mat, {}).keys())
+        if not unfilled:
+            continue
+        work.setdefault(mat, []).append(fp)
+    if not work:
+        return
+
+    try:
+        vc = VisionClient.from_settings()
+    except Exception:
+        return
+
+    for mat, files in work.items():
+        unfilled = slot_set - set(clean.get(mat, {}).keys())
+        for fp in files:
+            if not unfilled:
+                break
+            try:
+                b64, mime = image_to_base64(fp)
+                reply = vc.classify_image(_VISION_PROMPT, b64, mime)
+            except Exception:
+                continue
+            token = reply.strip().lower().replace(" ", "_").replace("-", "_")
+            slot = _VISION_TOKEN_TO_SLOT.get(token)
+            if slot is None or slot not in unfilled:
+                continue
+            clean.setdefault(mat, {})[slot] = fp
+            unfilled.discard(slot)
+            if marks is not None:
+                marks.setdefault(mat, []).append(slot)
+
+
+# ── Stage 3: reverse texture inference (experimental, flag-gated) ─────────
+
+
+# Distinct hues for material color-coding in the UV layout overlay. The
+# VLM is told which material maps to which color via the prompt, so the
+# concrete RGB values just need to be visually separable.
+_REVERSE_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (255,   0,   0),  # red
+    (  0,   0, 255),  # blue
+    (  0, 200,   0),  # green
+    (255, 165,   0),  # orange
+    (160,   0, 200),  # purple
+    (  0, 200, 200),  # cyan
+    (255, 255,   0),  # yellow
+    (255,   0, 200),  # magenta
+)
+
+_REVERSE_INFER_PROMPT_TMPL: str = (
+    "Texture image: '{tex_name}'. The companion image shows the mesh's UV "
+    "layout color-coded per material: {color_legend}. "
+    "Which material does this texture belong to? "
+    "Reply with EXACTLY ONE material name from this list: {mat_list}. "
+    "If you cannot tell, reply 'unknown'. No prose."
+)
+
+
+def _parse_reverse_inference_reply(reply: str, materials: list[str]) -> str | None:
+    """Extract a material name from a (possibly verbose) VLM reply.
+
+    Tries an exact case-insensitive match first; falls back to scanning
+    the reply for any material-name substring. Returns None for 'unknown'
+    or any garbage that doesn't contain a known material name.
+    """
+    norm = (reply or "").strip().lower()
+    if not norm or "unknown" in norm:
+        return None
+    # Exact match wins (handles the "EXACTLY ONE material name" case).
+    for m in materials:
+        if m.lower() == norm:
+            return m
+    # Substring scan for verbose replies.
+    for m in materials:
+        if m.lower() in norm:
+            return m
+    return None
+
+
+def _render_uv_layout_colored(
+    client: BlenderClient,
+    target_object: str,
+    materials: list[str],
+) -> tuple[str, str]:
+    """Render the mesh's full UV layout color-coded per material slot.
+
+    Returns (base64_jpeg, mime). Raises on any Blender / Pillow error so
+    the caller knows to fall through. The overlay is a 512×512 JPEG so
+    the wire payload stays small.
+    """
+    from PIL import Image, ImageDraw
+
+    header = (
+        f"import bpy, json\n"
+        f"_target = {target_object!r}\n"
+        f"_mats = {list(materials)!r}\n"
+        f"_sentinel = {BLENDER_SENTINEL!r}\n"
+    )
+    body = textwrap.dedent("""\
+        obj = bpy.data.objects.get(_target)
+        if obj is None or obj.type != "MESH":
+            print(_sentinel)
+            print("PRECONDITION:object_not_found")
+        else:
+            mesh = obj.data
+            uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
+            polys_by_mat = {m: [] for m in _mats}
+            if uv_layer is not None:
+                idx_for = {}
+                for name in _mats:
+                    idx_for[name] = -1
+                    for i, mx in enumerate(mesh.materials):
+                        if mx is not None and mx.name == name:
+                            idx_for[name] = i
+                            break
+                for poly in mesh.polygons:
+                    for name in _mats:
+                        if idx_for[name] >= 0 and poly.material_index == idx_for[name]:
+                            verts = []
+                            for li in poly.loop_indices:
+                                uv = uv_layer[li].uv
+                                verts.append([float(uv[0]), float(uv[1])])
+                            polys_by_mat[name].append(verts)
+                            break
+            print(_sentinel)
+            print("UV:" + json.dumps(polys_by_mat))
+    """)
+    lines = client.execute_and_extract(header + body)
+    if not lines or not lines[0].startswith("UV:"):
+        raise RuntimeError("UV layout extraction failed")
+    polys_by_mat = json.loads(lines[0][len("UV:"):])
+
+    canvas = Image.new("RGB", (512, 512), (32, 32, 32))
+    draw = ImageDraw.Draw(canvas)
+    w, h = canvas.size
+    for idx, name in enumerate(materials):
+        color = _REVERSE_PALETTE[idx % len(_REVERSE_PALETTE)]
+        for poly in polys_by_mat.get(name, []):
+            if len(poly) < 2:
+                continue
+            pts = [(u * w, (1 - v) * h) for (u, v) in poly]
+            for i in range(len(pts)):
+                draw.line(
+                    [pts[i], pts[(i + 1) % len(pts)]],
+                    fill=color, width=1,
+                )
+
+    import base64 as _b64
+    import io as _io
+    buf = _io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=85)
+    return (_b64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg")
+
+
+def _composite_texture_with_layout(
+    texture_path: str,
+    layout_b64: str,
+) -> tuple[str, str]:
+    """Build a side-by-side JPEG of (texture | UV layout) for the VLM.
+
+    Two distinct images would also work but a single composite halves
+    the upload size and most VLMs pay better attention to a single image
+    than to "compare these two" prompts.
+    """
+    import base64 as _b64
+    import io as _io
+
+    from PIL import Image
+
+    tex = Image.open(texture_path)
+    if tex.mode != "RGB":
+        tex = tex.convert("RGB")
+    if max(tex.size) > 512:
+        scale = 512 / max(tex.size)
+        tex = tex.resize(
+            (max(1, int(tex.size[0] * scale)),
+             max(1, int(tex.size[1] * scale))),
+            Image.LANCZOS,
+        )
+
+    layout = Image.open(_io.BytesIO(_b64.b64decode(layout_b64)))
+    if layout.mode != "RGB":
+        layout = layout.convert("RGB")
+    # Match heights for clean side-by-side stitching.
+    if layout.size[1] != tex.size[1]:
+        ratio = tex.size[1] / layout.size[1]
+        layout = layout.resize(
+            (max(1, int(layout.size[0] * ratio)), tex.size[1]),
+            Image.LANCZOS,
+        )
+
+    out = Image.new("RGB", (tex.size[0] + layout.size[0], tex.size[1]),
+                    (0, 0, 0))
+    out.paste(tex, (0, 0))
+    out.paste(layout, (tex.size[0], 0))
+
+    buf = _io.BytesIO()
+    out.save(buf, format="JPEG", quality=85)
+    return (_b64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg")
+
+
+async def infer_textures_by_reverse_uv_layout(
+    client: BlenderClient,
+    target_object: str,
+    materials: list[str],
+    texture_files: list[str],
+) -> dict[str, dict[str, str]]:
+    """Issue #22 Stage 3 — experimental reverse texture-to-material inference.
+
+    Gated by BOTH `vision_available()` AND `settings.vision_reverse_inference`.
+    When either is false, returns `{}` and makes no network/Blender calls.
+
+    Algorithm:
+      1. Render the mesh's UV layout once, color-coded per material slot.
+      2. For each candidate texture, composite (texture | layout) and ask
+         the VLM which material the texture belongs to.
+      3. Returns {material_name: {"Base Color": file_path}}. Slot defaults
+         to "Base Color" because this layer answers WHICH MATERIAL, not
+         which PBR channel — channel classification is Layer 3's job.
+
+    All results are SUGGESTIONS. The caller is responsible for marking
+    them experimental in the widget payload and never auto-applying.
+
+    Silent on every failure (vision off, flag off, render failure, VLM
+    exception, unknown reply) — pre-existing pipeline keeps working.
+    """
+    if not vision_available() or not getattr(settings, "vision_reverse_inference", False):
+        return {}
+    if not materials or not texture_files:
+        return {}
+
+    try:
+        vc = VisionClient.from_settings()
+    except Exception:
+        return {}
+
+    try:
+        layout_b64, _ = _render_uv_layout_colored(client, target_object, materials)
+    except Exception:
+        return {}
+
+    color_legend = ", ".join(
+        f"{m}={_REVERSE_PALETTE[i % len(_REVERSE_PALETTE)]}"
+        for i, m in enumerate(materials)
+    )
+
+    out: dict[str, dict[str, str]] = {}
+    for tex_path in texture_files:
+        try:
+            composite_b64, mime = _composite_texture_with_layout(tex_path, layout_b64)
+        except Exception:
+            continue
+        prompt = _REVERSE_INFER_PROMPT_TMPL.format(
+            tex_name=Path(tex_path).name,
+            color_legend=color_legend,
+            mat_list=", ".join(materials),
+        )
+        try:
+            reply = vc.classify_image(prompt, composite_b64, mime)
+        except Exception:
+            continue
+        mat = _parse_reverse_inference_reply(reply, materials)
+        if mat is None:
+            continue
+        out.setdefault(mat, {})["Base Color"] = tex_path
+    return out
 
 
 # ── Phase 5pre ────────────────────────────────────────────────────────────────
@@ -465,7 +934,194 @@ class MaterialConsolidate(PhaseTool):
         """)
         code = header + body
         lines = client.execute_and_extract(code)
-        return self._parse_scan_result(lines)
+        err, payload = self._parse_scan_result(lines)
+        if err is None and isinstance(payload, dict):
+            # Issue #22 Stage 2: ask VLM whether partial-overlap groups
+            # actually share UV space. Silent skip on every failure path.
+            groups = payload.get("consolidation_groups") or []
+            try:
+                proposals = self._propose_uv_assist_merges(
+                    client, target_object, groups,
+                )
+            except Exception:
+                proposals = []
+            if proposals:
+                payload["vision_merge_proposals"] = proposals
+        return err, payload
+
+    # ── Stage 2: UV-assist vision merge ────────────────────────────────────
+
+    def _propose_uv_assist_merges(
+        self,
+        client: BlenderClient,
+        target_object: str,
+        groups: list[dict],
+    ) -> list[dict]:
+        """Ask the configured VLM whether each partial-overlap material pair
+        actually shares the same UV region on their shared texture.
+
+        Returns [{keeper, to_remove, shared_texture, confidence,
+        vision_suggested}] for every pair the VLM said YES to (any
+        confidence). The agent loop is responsible for thresholding /
+        surfacing for user confirmation — see spec §"Stage 2 验收标准".
+
+        Silent on every failure path (vision unavailable, no candidates,
+        render error, network error, unparseable reply). The legacy
+        exact-match merge pipeline always still works.
+        """
+        if not vision_available():
+            return []
+        candidates = _find_partial_overlap_candidates(groups)
+        if not candidates:
+            return []
+        try:
+            vc = VisionClient.from_settings()
+        except Exception:
+            return []
+
+        proposals: list[dict] = []
+        for mat_a, mat_b, shared in candidates:
+            if not shared:
+                continue
+            texture_path = shared[0]
+            try:
+                image_b64, mime = self._render_uv_overlay(
+                    client, target_object, mat_a, mat_b, texture_path,
+                )
+            except Exception:
+                continue
+            prompt = _UV_OVERLAP_PROMPT_TMPL.format(
+                tex_name=Path(texture_path).name,
+                mat_a=mat_a, mat_b=mat_b,
+            )
+            try:
+                reply = vc.classify_image(prompt, image_b64, mime)
+            except Exception:
+                continue
+            verdict, confidence = _parse_uv_overlap_reply(reply)
+            if verdict == "yes":
+                proposals.append({
+                    "keeper": mat_a,
+                    "to_remove": [mat_b],
+                    "shared_texture": Path(texture_path).name,
+                    "confidence": confidence,
+                    "vision_suggested": True,
+                })
+        return proposals
+
+    def _render_uv_overlay(
+        self,
+        client: BlenderClient,
+        target_object: str,
+        mat_a: str,
+        mat_b: str,
+        texture_path: str,
+    ) -> tuple[str, str]:
+        """Render a JPEG (base64, mime) of the texture with both materials'
+        UV wireframes overlaid — mat_a in red, mat_b in blue.
+
+        Blender returns the per-material UV polygons; we composite on the
+        server with Pillow so the Blender side doesn't need PIL (it's not
+        guaranteed in every Blender bundle).
+        """
+        from PIL import Image, ImageDraw
+
+        # 1) Ask Blender for per-material UV polygons.
+        uv_data = self._extract_uv_polygons(client, target_object, mat_a, mat_b)
+        if uv_data is None:
+            raise RuntimeError("UV extraction returned no data")
+
+        # 2) Open the shared texture and downsize for the VLM.
+        img = Image.open(texture_path)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        if max(img.size) > 512:
+            scale = 512 / max(img.size)
+            img = img.resize(
+                (max(1, int(img.size[0] * scale)),
+                 max(1, int(img.size[1] * scale))),
+                Image.LANCZOS,
+            )
+
+        # 3) Draw wireframes. UV (0,0) is bottom-left in Blender — flip Y.
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+        for mat_name, color in ((mat_a, (255, 0, 0)), (mat_b, (0, 0, 255))):
+            for poly in uv_data.get(mat_name, []):
+                if len(poly) < 2:
+                    continue
+                pts = [(u * w, (1 - v) * h) for (u, v) in poly]
+                for i in range(len(pts)):
+                    draw.line(
+                        [pts[i], pts[(i + 1) % len(pts)]],
+                        fill=color, width=1,
+                    )
+
+        # 4) JPEG-encode, base64.
+        import base64 as _b64
+        import io as _io
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return (_b64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg")
+
+    @staticmethod
+    def _extract_uv_polygons(
+        client: BlenderClient,
+        target_object: str,
+        mat_a: str,
+        mat_b: str,
+    ) -> dict[str, list[list[list[float]]]] | None:
+        """Run a Blender script that emits per-material UV polygons.
+
+        Returns {mat_name: [[[u,v], [u,v], ...], ...]} — list of polygons,
+        each polygon a list of (u,v) vertex pairs. None on any error.
+        """
+        header = (
+            f"import bpy, json\n"
+            f"_target = {target_object!r}\n"
+            f"_mat_a = {mat_a!r}\n"
+            f"_mat_b = {mat_b!r}\n"
+            f"_sentinel = {BLENDER_SENTINEL!r}\n"
+        )
+        body = textwrap.dedent("""\
+            obj = bpy.data.objects.get(_target)
+            if obj is None or obj.type != "MESH":
+                print(_sentinel)
+                print("PRECONDITION:object_not_found")
+            else:
+                mesh = obj.data
+                uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
+                polys_by_mat = {_mat_a: [], _mat_b: []}
+                if uv_layer is not None:
+                    mat_idx = {}
+                    for name in (_mat_a, _mat_b):
+                        mat_idx[name] = -1
+                        for i, m in enumerate(mesh.materials):
+                            if m is not None and m.name == name:
+                                mat_idx[name] = i
+                                break
+                    for poly in mesh.polygons:
+                        for name in (_mat_a, _mat_b):
+                            if mat_idx[name] >= 0 and poly.material_index == mat_idx[name]:
+                                verts = []
+                                for li in poly.loop_indices:
+                                    uv = uv_layer[li].uv
+                                    verts.append([float(uv[0]), float(uv[1])])
+                                polys_by_mat[name].append(verts)
+                                break
+                print(_sentinel)
+                print("UV:" + json.dumps(polys_by_mat))
+        """)
+        try:
+            lines = client.execute_and_extract(header + body)
+        except Exception:
+            return None
+        if not lines or not lines[0].startswith("UV:"):
+            return None
+        try:
+            return json.loads(lines[0][len("UV:"):])
+        except json.JSONDecodeError:
+            return None
 
     @staticmethod
     def _parse_scan_result(lines: list[str]) -> tuple[PhaseError | None, dict]:

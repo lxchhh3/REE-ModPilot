@@ -59,7 +59,10 @@ from app.agent.state import (
 )
 from app.llm.client import LLMResponse, Message
 from app.phases.base import PhaseError, PhaseResult, PhaseTool
-from app.phases.material import suggest_texture_mapping
+from app.phases.material import (
+    infer_textures_by_reverse_uv_layout,
+    suggest_texture_mapping,
+)
 from app.phases.physics_annotate import annotate_chains
 from app.phases.query_tools import QueryTool
 
@@ -1133,14 +1136,20 @@ class PhaseLoop:
         materials: list[str],
         texture_files: list[str],
         existing_connections: dict[str, dict[str, str]],
+        *,
+        vision_marks: dict[str, list[str]] | None = None,
     ) -> dict[str, dict[str, str]]:
         """Thin wrapper around `material.suggest_texture_mapping` so tests can
         still `patch.object(AgentLoop, "_suggest_texture_mapping", ...)` and
         the call site reads naturally. Prompt + filtering live in
         `app.phases.material`.
+
+        Pass `vision_marks={}` to receive the parallel provenance map listing
+        which slots came from Layer 3 (vision) classification.
         """
         return await suggest_texture_mapping(
             self._llm, materials, texture_files, existing_connections,
+            vision_marks=vision_marks,
         )
 
     async def _emit_widget_if_inspector(
@@ -1200,9 +1209,23 @@ class PhaseLoop:
                 existing = state_diff.get("existing_connections") or {}
                 texture_files = state_diff.get("texture_files") or []
                 # Issue #11: run the suggest LLM call NOW so the deferred
-                # widget arrives with `suggestions` populated.
+                # widget arrives with `suggestions` populated. Issue #22 S1:
+                # collect vision provenance so the widget can badge the rows
+                # the user should review more carefully.
+                vision_marks: dict[str, list[str]] = {}
                 suggestions = await self._suggest_texture_mapping(
-                    materials, texture_files, existing
+                    materials, texture_files, existing,
+                    vision_marks=vision_marks,
+                )
+                # Issue #22 Stage 3 (experimental, flag-gated): reverse
+                # texture inference. Returns {} unless
+                # settings.vision_reverse_inference is True AND a vision
+                # model is configured. Suggestions surface separately —
+                # never merged into `suggestions` — so the widget can
+                # render them as EXPERIMENTAL with explicit confirmation.
+                experimental_suggestions = await infer_textures_by_reverse_uv_layout(
+                    self._blender, params.get("target_object") if params else "",
+                    materials, texture_files,
                 )
                 self._pending_widget = (
                     "widget_material",
@@ -1211,6 +1234,8 @@ class PhaseLoop:
                         "existing_connections": existing,
                         "texture_files": texture_files,
                         "suggestions": suggestions,
+                        "vision_suggested_slots": vision_marks,
+                        "experimental_suggestions": experimental_suggestions,
                     },
                 )
         elif tool_name == "setup_infer_model_type":

@@ -71,6 +71,39 @@ class OpenAIProvider(BaseProvider):
         response = self._client.chat.completions.create(**kwargs)
         return _parse_response(response)
 
+    def chat_with_image(
+        self,
+        prompt: str,
+        image_b64: str,
+        mime_type: str,
+        *,
+        system: str = "",
+        max_tokens: int = 256,
+    ) -> LLMResponse:
+        """Single-image vision call (issue #22 Stage 0).
+
+        OpenAI-compatible vision shape uses data URIs:
+            content = [{"type": "text", "text": ...},
+                       {"type": "image_url", "image_url": {"url": "data:<mime>;base64,<b64>"}}]
+        Qwen-VL on DashScope and DeepSeek-VL2 both accept this format.
+        """
+        data_uri = f"data:{mime_type};base64,{image_b64}"
+        user_content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+        ]
+        messages: list[dict[str, Any]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": user_content})
+
+        response = self._client.chat.completions.create(
+            model=self._model,
+            max_tokens=max_tokens,
+            messages=messages,
+        )
+        return _parse_response(response)
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 

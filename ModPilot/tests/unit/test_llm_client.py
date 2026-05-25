@@ -287,3 +287,114 @@ class TestOpenAIProviderParsing:
             oai_tools = call_kwargs["tools"]
             assert oai_tools[0]["type"] == "function"
             assert oai_tools[0]["function"]["name"] == "run_phase"
+
+
+# ── chat_with_image (issue #22 Stage 0) ────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestAnthropicProviderImageChat:
+    def test_chat_with_image_emits_image_block_alongside_text(self):
+        """Anthropic image content block shape:
+        {"type": "image", "source": {"type": "base64", "media_type": ..., "data": ...}}
+        """
+        with patch("app.llm.anthropic_provider.anthropic.Anthropic") as MockAnthropic:
+            mock_client = MagicMock()
+            MockAnthropic.return_value = mock_client
+            mock_client.messages.create.return_value = _make_anthropic_response(
+                text="base_color"
+            )
+
+            provider = AnthropicProvider(api_key="key", model="claude-haiku-4-5")
+            resp = provider.chat_with_image(
+                prompt="classify this",
+                image_b64="ZmFrZQ==",
+                mime_type="image/jpeg",
+                max_tokens=128,
+            )
+
+            call_kwargs = mock_client.messages.create.call_args.kwargs
+            # One user message, content is a block list with image + text.
+            assert len(call_kwargs["messages"]) == 1
+            content = call_kwargs["messages"][0]["content"]
+            assert isinstance(content, list)
+            img_block = next(b for b in content if b["type"] == "image")
+            assert img_block["source"] == {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": "ZmFrZQ==",
+            }
+            text_block = next(b for b in content if b["type"] == "text")
+            assert text_block["text"] == "classify this"
+            assert call_kwargs["max_tokens"] == 128
+            assert resp.content == "base_color"
+
+    def test_chat_with_image_respects_system_prompt(self):
+        with patch("app.llm.anthropic_provider.anthropic.Anthropic") as MockAnthropic:
+            mock_client = MagicMock()
+            MockAnthropic.return_value = mock_client
+            mock_client.messages.create.return_value = _make_anthropic_response()
+
+            provider = AnthropicProvider(api_key="key", cache_system=False)
+            provider.chat_with_image(
+                prompt="?",
+                image_b64="ZmFrZQ==",
+                mime_type="image/png",
+                system="be brief",
+            )
+            call_kwargs = mock_client.messages.create.call_args.kwargs
+            assert call_kwargs["system"] == "be brief"
+
+
+@pytest.mark.unit
+class TestOpenAIProviderImageChat:
+    def test_chat_with_image_emits_image_url_data_uri(self):
+        """OpenAI vision content block shape:
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
+        """
+        with patch("app.llm.openai_provider.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.chat.completions.create.return_value = _make_openai_response(
+                text="normal"
+            )
+
+            provider = OpenAIProvider(api_key="key", model="qwen-vl-max")
+            resp = provider.chat_with_image(
+                prompt="classify this",
+                image_b64="ZmFrZQ==",
+                mime_type="image/jpeg",
+                max_tokens=64,
+            )
+
+            call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+            messages = call_kwargs["messages"]
+            # No system message → exactly one user message.
+            assert len(messages) == 1
+            user_content = messages[0]["content"]
+            assert isinstance(user_content, list)
+            url_block = next(b for b in user_content if b["type"] == "image_url")
+            assert url_block["image_url"]["url"] == (
+                "data:image/jpeg;base64,ZmFrZQ=="
+            )
+            text_block = next(b for b in user_content if b["type"] == "text")
+            assert text_block["text"] == "classify this"
+            assert call_kwargs["max_tokens"] == 64
+            assert resp.content == "normal"
+
+    def test_chat_with_image_prepends_system_message(self):
+        with patch("app.llm.openai_provider.OpenAI") as MockOpenAI:
+            mock_client = MagicMock()
+            MockOpenAI.return_value = mock_client
+            mock_client.chat.completions.create.return_value = _make_openai_response()
+
+            provider = OpenAIProvider(api_key="key", model="qwen-vl-max")
+            provider.chat_with_image(
+                prompt="?",
+                image_b64="ZmFrZQ==",
+                mime_type="image/png",
+                system="be terse",
+            )
+            messages = mock_client.chat.completions.create.call_args.kwargs["messages"]
+            assert messages[0] == {"role": "system", "content": "be terse"}
+            assert messages[1]["role"] == "user"

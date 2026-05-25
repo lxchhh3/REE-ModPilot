@@ -92,6 +92,50 @@ class OllamaProvider(BaseProvider):
             response.raise_for_status()
             return _parse_response(response.json())
 
+    def chat_with_image(
+        self,
+        prompt: str,
+        image_b64: str,
+        mime_type: str,  # noqa: ARG002 — Ollama infers MIME from bytes
+        *,
+        system: str = "",
+        max_tokens: int = 256,
+    ) -> LLMResponse:
+        """Single-image vision call (issue #22 Stage 0).
+
+        Ollama /api/chat carries images as a base64 list on the user message:
+            {"role": "user", "content": "...", "images": ["<b64>"]}
+        The MIME type is not encoded — Ollama sniffs the bytes — but callers
+        pass it for API symmetry with the other providers.
+        """
+        messages: list[dict[str, Any]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({
+            "role": "user",
+            "content": prompt,
+            "images": [image_b64],
+        })
+
+        body: dict[str, Any] = {
+            "model": self._model,
+            "stream": False,
+            "messages": messages,
+            "options": {"temperature": 0, "num_predict": max_tokens},
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        with httpx.Client(timeout=self._timeout) as client:
+            response = client.post(
+                f"{self._base_url}/api/chat",
+                headers=headers,
+                content=json.dumps(body).encode("utf-8"),
+            )
+            response.raise_for_status()
+            return _parse_response(response.json())
+
 
 # ── message translation ───────────────────────────────────────────────────
 

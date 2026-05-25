@@ -92,6 +92,25 @@ class BaseProvider(ABC):
         """Return the model identifier string used by this provider."""
         ...
 
+    def chat_with_image(
+        self,
+        prompt: str,
+        image_b64: str,
+        mime_type: str,
+        *,
+        system: str = "",
+        max_tokens: int = 256,
+    ) -> LLMResponse:
+        """Send a single-image, single-prompt message and return the reply.
+
+        Default raises NotImplementedError; vision-capable providers override.
+        Used by VisionClient (issue #22 Stage 0) — not part of the agent
+        loop's main chat() path.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support image input."
+        )
+
 
 # ── facade ─────────────────────────────────────────────────────────────────
 

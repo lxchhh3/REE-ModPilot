@@ -606,3 +606,744 @@ class TestSuggestTextureMapping:
         }))
         result = asyncio.run(suggest_texture_mapping(llm, ["body"], ["body.png"], {}))
         assert result == {"body": {"Base Color": "body.png"}}
+
+
+# ── Stage 3 — reverse texture inference (flag-gated) ─────────────────────────
+
+
+@pytest.mark.unit
+class TestReverseInferenceFlagGate:
+    """Stage 3 is OFF unless BOTH settings flags are set."""
+
+    def test_disabled_when_flag_off_even_if_vision_available(self):
+        from app.phases import material as material_mod
+
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod, "settings") as mock_settings,
+        ):
+            mock_settings.vision_reverse_inference = False
+            out = asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                client=MagicMock(),
+                target_object="Mesh",
+                materials=["body"],
+                texture_files=["body.png"],
+            ))
+        assert out == {}
+
+    def test_disabled_when_vision_unavailable_even_if_flag_on(self):
+        from app.phases import material as material_mod
+
+        with (
+            patch.object(material_mod, "vision_available", return_value=False),
+            patch.object(material_mod, "settings") as mock_settings,
+        ):
+            mock_settings.vision_reverse_inference = True
+            out = asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                client=MagicMock(),
+                target_object="Mesh",
+                materials=["body"],
+                texture_files=["body.png"],
+            ))
+        assert out == {}
+
+    def test_empty_inputs_short_circuit(self):
+        from app.phases import material as material_mod
+
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod, "settings") as mock_settings,
+        ):
+            mock_settings.vision_reverse_inference = True
+            assert asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                MagicMock(), "Mesh", [], ["x.png"],
+            )) == {}
+            assert asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                MagicMock(), "Mesh", ["m"], [],
+            )) == {}
+
+
+@pytest.mark.unit
+class TestReverseInferenceRouting:
+    """End-to-end with mocked VLM and overlay renderer."""
+
+    def test_vlm_picks_material_routes_texture_to_base_color(self):
+        from app.phases import material as material_mod
+
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "head"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod, "settings") as mock_settings,
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "_render_uv_layout_colored",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+            patch.object(material_mod, "_composite_texture_with_layout",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            mock_settings.vision_reverse_inference = True
+            out = asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                client=MagicMock(),
+                target_object="Mesh",
+                materials=["body", "head"],
+                texture_files=["something_01.png"],
+            ))
+        # Texture routed to "head" → goes into Base Color (experimental).
+        assert out == {"head": {"Base Color": "something_01.png"}}
+
+    def test_vlm_unknown_reply_skips_texture(self):
+        from app.phases import material as material_mod
+
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "unknown"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod, "settings") as mock_settings,
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "_render_uv_layout_colored",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+            patch.object(material_mod, "_composite_texture_with_layout",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            mock_settings.vision_reverse_inference = True
+            out = asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                MagicMock(), "Mesh", ["body"], ["x.png"],
+            ))
+        assert out == {}
+
+    def test_layout_render_failure_returns_empty(self):
+        from app.phases import material as material_mod
+
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod, "settings") as mock_settings,
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=MagicMock()),
+            patch.object(material_mod, "_render_uv_layout_colored",
+                         side_effect=RuntimeError("blender hiccup")),
+        ):
+            mock_settings.vision_reverse_inference = True
+            out = asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                MagicMock(), "Mesh", ["body"], ["x.png"],
+            ))
+        assert out == {}
+
+    def test_per_texture_vlm_exception_skipped(self):
+        from app.phases import material as material_mod
+
+        vc_stub = MagicMock()
+        # First call raises, second succeeds.
+        vc_stub.classify_image.side_effect = [
+            RuntimeError("502"), "body",
+        ]
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod, "settings") as mock_settings,
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "_render_uv_layout_colored",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+            patch.object(material_mod, "_composite_texture_with_layout",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            mock_settings.vision_reverse_inference = True
+            out = asyncio.run(material_mod.infer_textures_by_reverse_uv_layout(
+                MagicMock(), "Mesh", ["body"], ["a.png", "b.png"],
+            ))
+        # First texture skipped (exception), second routed successfully.
+        assert out == {"body": {"Base Color": "b.png"}}
+
+
+@pytest.mark.unit
+class TestParseReverseInferenceReply:
+    def test_exact_material_match(self):
+        from app.phases.material import _parse_reverse_inference_reply
+        assert _parse_reverse_inference_reply("body", ["body", "head"]) == "body"
+
+    def test_case_insensitive_match(self):
+        from app.phases.material import _parse_reverse_inference_reply
+        assert _parse_reverse_inference_reply("BODY", ["body", "head"]) == "body"
+
+    def test_extracts_material_from_verbose_reply(self):
+        """Models often reply 'The texture belongs to body' despite instruction."""
+        from app.phases.material import _parse_reverse_inference_reply
+        assert _parse_reverse_inference_reply(
+            "This texture belongs to head.", ["body", "head"],
+        ) == "head"
+
+    def test_unknown_reply_returns_none(self):
+        from app.phases.material import _parse_reverse_inference_reply
+        assert _parse_reverse_inference_reply("unknown", ["body"]) is None
+
+    def test_garbage_returns_none(self):
+        from app.phases.material import _parse_reverse_inference_reply
+        assert _parse_reverse_inference_reply("???", ["body"]) is None
+
+
+# ── _scan_groups UV-assist (issue #22 Stage 2) ───────────────────────────────
+
+
+@pytest.mark.unit
+class TestFindPartialOverlapCandidates:
+    """Pure-function tests for partial-overlap group detection."""
+
+    def test_no_overlap_returns_empty(self):
+        from app.phases.material import _find_partial_overlap_candidates
+        groups = [
+            {"keeper": "head", "texture_set": ["head_d.png"]},
+            {"keeper": "body", "texture_set": ["body_d.png"]},
+        ]
+        assert _find_partial_overlap_candidates(groups) == []
+
+    def test_identical_sets_excluded(self):
+        """Existing exact-match grouping already merged identical sets; if
+        somehow two groups arrive with identical texture sets, they aren't
+        partial-overlap candidates (they would just merge directly)."""
+        from app.phases.material import _find_partial_overlap_candidates
+        groups = [
+            {"keeper": "a", "texture_set": ["x.png"]},
+            {"keeper": "b", "texture_set": ["x.png"]},
+        ]
+        assert _find_partial_overlap_candidates(groups) == []
+
+    def test_partial_overlap_returned(self):
+        from app.phases.material import _find_partial_overlap_candidates
+        groups = [
+            {"keeper": "body_a", "texture_set": ["body_d.png", "body_n.png"]},
+            {"keeper": "body_b", "texture_set": ["body_d.png"]},
+        ]
+        result = _find_partial_overlap_candidates(groups)
+        assert result == [("body_a", "body_b", ["body_d.png"])]
+
+    def test_singletons_with_no_texture_skipped(self):
+        from app.phases.material import _find_partial_overlap_candidates
+        groups = [
+            {"keeper": "skin", "texture_set": ["d.png"]},
+            {"keeper": "empty", "texture_set": []},
+        ]
+        assert _find_partial_overlap_candidates(groups) == []
+
+
+@pytest.mark.unit
+class TestParseUvOverlapReply:
+    """VLM reply normalization for the YES/NO + confidence prompt."""
+
+    def test_yes_with_confidence(self):
+        from app.phases.material import _parse_uv_overlap_reply
+        assert _parse_uv_overlap_reply("YES 0.9") == ("yes", 0.9)
+
+    def test_no_with_confidence(self):
+        from app.phases.material import _parse_uv_overlap_reply
+        assert _parse_uv_overlap_reply("NO 0.65") == ("no", 0.65)
+
+    def test_verbose_yes_confidence(self):
+        """Models sometimes wrap with punctuation despite instructions."""
+        from app.phases.material import _parse_uv_overlap_reply
+        v, c = _parse_uv_overlap_reply("YES, confidence: 0.85")
+        assert v == "yes" and abs(c - 0.85) < 1e-6
+
+    def test_yes_without_score_defaults_to_half(self):
+        from app.phases.material import _parse_uv_overlap_reply
+        assert _parse_uv_overlap_reply("YES") == ("yes", 0.5)
+
+    def test_garbage_returns_no_zero(self):
+        from app.phases.material import _parse_uv_overlap_reply
+        assert _parse_uv_overlap_reply("???") == ("no", 0.0)
+
+    def test_confidence_clamped(self):
+        from app.phases.material import _parse_uv_overlap_reply
+        # > 1.0 clamps down
+        assert _parse_uv_overlap_reply("YES 1.5") == ("yes", 1.0)
+
+
+@pytest.mark.unit
+class TestProposeUvAssistMerges:
+    """End-to-end behavior of MaterialConsolidate._propose_uv_assist_merges
+    with a stubbed VisionClient and mocked UV overlay renderer."""
+
+    def _groups(self) -> list[dict]:
+        # Two distinct groups sharing one texture — the canonical Stage 2 case.
+        return [
+            {"keeper": "Body.001", "texture_set": ["body_d.png", "body_n.png"]},
+            {"keeper": "Body.002", "texture_set": ["body_d.png"]},
+        ]
+
+    def test_vision_unavailable_returns_no_proposals(self):
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+        with patch.object(material_mod, "vision_available", return_value=False):
+            out = consolidator._propose_uv_assist_merges(
+                client=MagicMock(), target_object="Mesh", groups=self._groups(),
+            )
+        assert out == []
+
+    def test_no_candidates_returns_empty(self):
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+        # Disjoint texture sets → no overlap candidates.
+        groups = [
+            {"keeper": "a", "texture_set": ["x.png"]},
+            {"keeper": "b", "texture_set": ["y.png"]},
+        ]
+        with patch.object(material_mod, "vision_available", return_value=True):
+            out = consolidator._propose_uv_assist_merges(
+                client=MagicMock(), target_object="Mesh", groups=groups,
+            )
+        assert out == []
+
+    def test_vision_yes_produces_proposal_with_confidence(self):
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "YES 0.9"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod.MaterialConsolidate, "_render_uv_overlay",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            out = consolidator._propose_uv_assist_merges(
+                client=MagicMock(), target_object="Mesh", groups=self._groups(),
+            )
+        assert len(out) == 1
+        prop = out[0]
+        assert prop["keeper"] == "Body.001"
+        assert prop["to_remove"] == ["Body.002"]
+        assert prop["shared_texture"] == "body_d.png"
+        assert abs(prop["confidence"] - 0.9) < 1e-6
+        assert prop["vision_suggested"] is True
+
+    def test_vision_no_skips_proposal(self):
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "NO 0.85"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod.MaterialConsolidate, "_render_uv_overlay",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            out = consolidator._propose_uv_assist_merges(
+                client=MagicMock(), target_object="Mesh", groups=self._groups(),
+            )
+        assert out == []
+
+    def test_render_exception_skipped(self):
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "YES 0.9"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod.MaterialConsolidate, "_render_uv_overlay",
+                         side_effect=RuntimeError("blender hiccup")),
+        ):
+            out = consolidator._propose_uv_assist_merges(
+                client=MagicMock(), target_object="Mesh", groups=self._groups(),
+            )
+        # Render failure must not crash the scan; just skip the candidate.
+        assert out == []
+
+    def test_vlm_exception_skipped(self):
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+        vc_stub = MagicMock()
+        vc_stub.classify_image.side_effect = RuntimeError("network 502")
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod.MaterialConsolidate, "_render_uv_overlay",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            out = consolidator._propose_uv_assist_merges(
+                client=MagicMock(), target_object="Mesh", groups=self._groups(),
+            )
+        assert out == []
+
+
+@pytest.mark.unit
+class TestScanGroupsVisionMergeProposals:
+    """Integration of UV-assist merges into _scan_groups output."""
+
+    def test_scan_groups_appends_proposals_when_vision_yes(self):
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+
+        # Stub the Blender exchange to return a 2-group payload with overlap.
+        fake_lines = [
+            "GROUPS:" + json.dumps({
+                "consolidation_groups": [
+                    {"keeper": "A", "to_remove": [], "is_singleton": True,
+                     "materials": ["A"], "texture_set": ["shared.png", "a.png"]},
+                    {"keeper": "B", "to_remove": [], "is_singleton": True,
+                     "materials": ["B"], "texture_set": ["shared.png"]},
+                ],
+                "material_count_before": 2,
+            }),
+        ]
+        client = MagicMock()
+        client.execute_and_extract.return_value = fake_lines
+
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "YES 0.95"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod.MaterialConsolidate, "_render_uv_overlay",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            err, payload = consolidator._scan_groups(client, "Mesh")
+        assert err is None
+        assert "vision_merge_proposals" in payload
+        assert len(payload["vision_merge_proposals"]) == 1
+        prop = payload["vision_merge_proposals"][0]
+        assert {prop["keeper"], prop["to_remove"][0]} == {"A", "B"}
+
+    def test_scan_groups_omits_field_when_no_proposals(self):
+        """When vision is off OR no candidates, the field is absent — keeps
+        the legacy payload shape for downstream consumers."""
+        from app.phases import material as material_mod
+        consolidator = material_mod.MaterialConsolidate()
+        fake_lines = [
+            "GROUPS:" + json.dumps({
+                "consolidation_groups": [
+                    {"keeper": "Only", "to_remove": [], "is_singleton": True,
+                     "materials": ["Only"], "texture_set": ["x.png"]},
+                ],
+                "material_count_before": 1,
+            }),
+        ]
+        client = MagicMock()
+        client.execute_and_extract.return_value = fake_lines
+        with patch.object(material_mod, "vision_available", return_value=False):
+            err, payload = consolidator._scan_groups(client, "Mesh")
+        assert err is None
+        assert "vision_merge_proposals" not in payload
+
+
+# ── suggest_texture_mapping — Layer 3 vision fallback (issue #22 Stage 1) ────
+
+
+@pytest.mark.unit
+class TestSuggestTextureMappingVisionFallback:
+    """Layer 3 fallback: when vision_model is configured, classify by-pixel
+    PBR channel for texture files that Layer 2 (filename LLM) left unused.
+
+    Bypasses `_has_slot_token` for vision-derived slots — the VLM saw the
+    pixels, which is stronger evidence than filename suffix matching.
+
+    All tests run sync via asyncio.run for parity with the Layer 2 tests.
+    """
+
+    def test_vision_unavailable_skips_layer_3(self):
+        """When vision_model is empty, Layer 2 result is returned unchanged
+        and no VisionClient is ever built."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm(json.dumps({"body": {"Base Color": "body.png"}}))
+        with (
+            patch.object(material_mod, "vision_available", return_value=False),
+            patch.object(material_mod, "VisionClient") as vc_cls,
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png", "body_extra.png"], {},
+            ))
+        assert result == {"body": {"Base Color": "body.png"}}
+        vc_cls.from_settings.assert_not_called()
+
+    def test_vision_fills_unfilled_normal_slot(self):
+        """VLM classifies an unused texture as a normal map — the Normal
+        slot fills even though the filename has no `_n` suffix token."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm(json.dumps({"body": {"Base Color": "body.png"}}))
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "normal"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png", "body_extra.png"], {},
+            ))
+        assert result == {
+            "body": {"Base Color": "body.png", "Normal": "body_extra.png"},
+        }
+
+    def test_vision_alias_diffuse_maps_to_base_color(self):
+        """Common synonyms (diffuse, albedo, basecolor) all collapse to
+        the canonical 'Base Color' slot."""
+        from app.phases import material as material_mod
+
+        # Layer 2 returns nothing — sole texture is a candidate for Layer 3.
+        llm = _stub_llm("{}")
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "diffuse"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png"], {},
+            ))
+        assert result == {"body": {"Base Color": "body.png"}}
+
+    def test_vision_unrecognized_response_is_dropped(self):
+        """If the VLM replies with a non-PBR token, the slot stays unfilled
+        rather than being polluted with garbage."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm(json.dumps({"body": {"Base Color": "body.png"}}))
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "elephant"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png", "body_extra.png"], {},
+            ))
+        assert result == {"body": {"Base Color": "body.png"}}
+
+    def test_vision_exception_is_swallowed(self):
+        """Any VLM call failure (network, auth, decode) must NOT crash the
+        widget pre-fill — Layer 2 output survives untouched."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm(json.dumps({"body": {"Base Color": "body.png"}}))
+        vc_stub = MagicMock()
+        vc_stub.classify_image.side_effect = RuntimeError("HTTP 502")
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png", "body_extra.png"], {},
+            ))
+        assert result == {"body": {"Base Color": "body.png"}}
+
+    def test_layer_3_does_not_reclassify_used_textures(self):
+        """Files already assigned by Layer 2 are skipped — Layer 3 only
+        targets the leftovers, so VLM cost scales with miss count."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm(json.dumps({
+            "body": {"Base Color": "body.png", "Normal": "body_n.png"},
+        }))
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "roughness"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png", "body_n.png", "body_extra.png"], {},
+            ))
+        # body.png + body_n.png used by Layer 2 → only body_extra.png is
+        # passed to the VLM (exactly one classify_image call).
+        assert vc_stub.classify_image.call_count == 1
+        assert result == {"body": {
+            "Base Color": "body.png",
+            "Normal": "body_n.png",
+            "Roughness": "body_extra.png",
+        }}
+
+    def test_layer_3_routes_by_material_name_in_filename(self):
+        """With multiple materials, an unused texture is routed to whichever
+        material's name appears in its filename. Files matching no material
+        name are skipped (no VLM call) — we have nowhere to put them."""
+        from app.phases import material as material_mod
+
+        # Layer 2 returns nothing; Layer 3 must pick the right material per file.
+        llm = _stub_llm("{}")
+        vc_stub = MagicMock()
+        # Two files: hair_x.png belongs to 'hair'; orphan.png matches nobody.
+        vc_stub.classify_image.return_value = "normal"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm,
+                ["body", "hair"],
+                ["hair_x.png", "orphan.png"],
+                {},
+            ))
+        # Only the file with an embedded material name is classified.
+        assert vc_stub.classify_image.call_count == 1
+        assert result == {"hair": {"Normal": "hair_x.png"}}
+
+    def test_vision_known_unmapped_tokens_dropped_no_assignment(self):
+        """ao / packed_orm / specular are real PBR channels but Principled
+        BSDF has no slot for them. VLM correctly returning one of these
+        must NOT be assigned to ANY slot (especially not 'other')."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm(json.dumps({"body": {"Base Color": "body.png"}}))
+        for token in ("ao", "ambient_occlusion", "packed_orm", "orm", "specular"):
+            vc_stub = MagicMock()
+            vc_stub.classify_image.return_value = token
+            with (
+                patch.object(material_mod, "vision_available", return_value=True),
+                patch.object(material_mod.VisionClient, "from_settings",
+                             return_value=vc_stub),
+                patch.object(material_mod, "image_to_base64",
+                             return_value=("ZmFrZQ==", "image/jpeg")),
+            ):
+                result = asyncio.run(material_mod.suggest_texture_mapping(
+                    llm, ["body"], ["body.png", "body_extra.png"], {},
+                ))
+            assert result == {"body": {"Base Color": "body.png"}}, (
+                f"token {token!r} must not produce any slot assignment"
+            )
+
+    def test_vision_alpha_token_maps_first(self):
+        """Alpha is at the top of the prompt vocabulary and must route
+        cleanly — common Layer 2 miss for stylized models."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm("{}")
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "alpha"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body_mask_xxx.png"], {},
+            ))
+        assert result == {"body": {"Alpha": "body_mask_xxx.png"}}
+
+    def test_vision_marks_populates_provenance_map(self):
+        """When the caller passes `vision_marks={}`, the dict is populated
+        with {mat: [slot, ...]} for slots Layer 3 filled. Layer 2 slots
+        are NOT included."""
+        from app.phases import material as material_mod
+
+        # Layer 2 fills Base Color; Layer 3 fills Normal via VLM.
+        llm = _stub_llm(json.dumps({"body": {"Base Color": "body.png"}}))
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "normal"
+        marks: dict[str, list[str]] = {}
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png", "body_extra.png"], {},
+                vision_marks=marks,
+            ))
+        # Only Normal — Base Color came from Layer 2.
+        assert marks == {"body": ["Normal"]}
+
+    def test_vision_marks_unused_when_caller_passes_none(self):
+        """Default `vision_marks=None` keeps the legacy signature working
+        — no provenance, no exception."""
+        from app.phases import material as material_mod
+
+        llm = _stub_llm(json.dumps({"body": {"Base Color": "body.png"}}))
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "normal"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            # No vision_marks kwarg → silent provenance.
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm, ["body"], ["body.png", "body_extra.png"], {},
+            ))
+        assert "Normal" in result["body"]
+
+    def test_layer_3_single_material_routes_orphan_files(self):
+        """Single-material models often have generic texture names (tex_01,
+        ch_d, etc.) that don't carry the material name. With only one
+        material to assign to, ambiguity disappears and the file IS routed.
+        """
+        from app.phases import material as material_mod
+
+        llm = _stub_llm("{}")
+        vc_stub = MagicMock()
+        vc_stub.classify_image.return_value = "normal"
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+            patch.object(material_mod, "image_to_base64",
+                         return_value=("ZmFrZQ==", "image/jpeg")),
+        ):
+            result = asyncio.run(material_mod.suggest_texture_mapping(
+                llm,
+                ["Body"],                          # only one material
+                ["tex_01.png"],                    # filename has no 'body'
+                {},
+            ))
+        # Single-material fallback overrides the name-match heuristic.
+        assert result == {"Body": {"Normal": "tex_01.png"}}
+
+    def test_layer_3_skips_when_no_unfilled_slots_left(self):
+        """If Layer 2 already filled every slot for every material, Layer 3
+        has nothing to add and shouldn't waste a VLM call."""
+        from app.phases import material as material_mod
+
+        # Layer 2 fills all six PBS slots — but we only need to assert
+        # that vc.classify_image is NOT called when there's no slot to fill.
+        llm = _stub_llm(json.dumps({
+            "body": {
+                "Base Color": "body.png",
+                "Alpha":      "body_a.png",
+                "Roughness":  "body_r.png",
+                "Metallic":   "body_m.png",
+                "Emission":   "body_e.png",
+                "Normal":     "body_n.png",
+            },
+        }))
+        vc_stub = MagicMock()
+        with (
+            patch.object(material_mod, "vision_available", return_value=True),
+            patch.object(material_mod.VisionClient, "from_settings",
+                         return_value=vc_stub),
+        ):
+            asyncio.run(material_mod.suggest_texture_mapping(
+                llm,
+                ["body"],
+                ["body.png", "body_a.png", "body_r.png", "body_m.png",
+                 "body_e.png", "body_n.png", "body_extra.png"],
+                {},
+            ))
+        vc_stub.classify_image.assert_not_called()

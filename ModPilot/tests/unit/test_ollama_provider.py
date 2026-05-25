@@ -275,6 +275,59 @@ def test_chat_posts_to_api_chat_with_bearer_auth():
     assert r.stop_reason == "end_turn"
 
 
+# ── chat_with_image (issue #22 Stage 0) ───────────────────────────────────
+
+
+@pytest.mark.unit
+def test_chat_with_image_attaches_base64_image_to_user_message():
+    """Ollama /api/chat accepts images as a base64 list on the user message:
+        {"role": "user", "content": "...", "images": ["<b64>"]}
+    The MIME type is not encoded in-band (Ollama infers from the bytes), so
+    callers pass it for completeness but it's not used in the wire body.
+    """
+    p = OllamaProvider(api_key="ok-key", model="llava:13b")
+
+    captured: dict = {}
+
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {
+        "model": "llava:13b",
+        "done": True,
+        "done_reason": "stop",
+        "message": {"role": "assistant", "content": "base_color"},
+    }
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["content"] = kwargs.get("content")
+        return fake_response
+
+    fake_client = MagicMock()
+    fake_client.__enter__ = MagicMock(return_value=fake_client)
+    fake_client.__exit__ = MagicMock(return_value=False)
+    fake_client.post = fake_post
+
+    with patch("app.llm.ollama_provider.httpx.Client", return_value=fake_client):
+        r = p.chat_with_image(
+            prompt="classify this",
+            image_b64="ZmFrZQ==",
+            mime_type="image/jpeg",
+            system="be terse",
+            max_tokens=64,
+        )
+
+    sent = json.loads(captured["content"])
+    # system message preserved
+    assert sent["messages"][0] == {"role": "system", "content": "be terse"}
+    user_msg = sent["messages"][1]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"] == "classify this"
+    assert user_msg["images"] == ["ZmFrZQ=="]
+    assert sent["options"]["num_predict"] == 64
+    assert r.content == "base_color"
+
+
 @pytest.mark.unit
 def test_chat_uses_override_base_url():
     """Constructor base_url override is honored (e.g. local Ollama daemon)."""

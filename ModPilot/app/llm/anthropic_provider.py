@@ -86,6 +86,44 @@ class AnthropicProvider(BaseProvider):
         response = self._client.messages.create(**kwargs)
         return _parse_response(response)
 
+    def chat_with_image(
+        self,
+        prompt: str,
+        image_b64: str,
+        mime_type: str,
+        *,
+        system: str = "",
+        max_tokens: int = 256,
+    ) -> LLMResponse:
+        """Single-image vision call (issue #22 Stage 0).
+
+        Builds Anthropic's content-block format:
+            [{"type": "image", "source": {"type": "base64", ...}},
+             {"type": "text",  "text": prompt}]
+        System prompt is sent uncached because vision classification calls are
+        one-shot and don't benefit from the 5-minute cache window.
+        """
+        content_blocks: list[dict[str, Any]] = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": image_b64,
+                },
+            },
+            {"type": "text", "text": prompt},
+        ]
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": content_blocks}],
+        }
+        if system:
+            kwargs["system"] = system
+        response = self._client.messages.create(**kwargs)
+        return _parse_response(response)
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 

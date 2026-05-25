@@ -941,6 +941,7 @@ async def get_app_config() -> JSONResponse:
     configured yet". The UI uses this distinction to render the placeholder.
     """
     has_key = bool(settings.llm_api_key)
+    from app.llm.vision_client import vision_available
     return JSONResponse({
         "llm_provider": settings.llm_provider,
         "llm_api_key": _API_KEY_MASK if has_key else "",
@@ -949,6 +950,11 @@ async def get_app_config() -> JSONResponse:
         "blender_host": settings.blender_host,
         "blender_port": settings.blender_port,
         "has_api_key": has_key,
+        # Issue #22 Stage 0: surface the vision gate so the UI can show /
+        # grey out vision-dependent features. The vision_* fields themselves
+        # are not yet user-editable from /config — they remain .env-only
+        # until Stages 1-3 land.
+        "vision_available": vision_available(),
     })
 
 
@@ -985,6 +991,11 @@ async def post_app_config(body: AppConfigUpdate) -> JSONResponse:
     persisted.update(incoming)
     apply_to_settings(settings, persisted)
     save_persisted_config(persisted)
+
+    # vision_available() snapshots settings.vision_model on first call;
+    # invalidate so a freshly-saved vision_model takes effect immediately.
+    from app.llm.vision_client import refresh_vision_cache
+    refresh_vision_cache()
 
     status = _refresh_runtime_clients(blender_changed=blender_changed)
     return JSONResponse({"saved": True, "status": status})

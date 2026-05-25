@@ -112,6 +112,15 @@ export interface WidgetMaterialEvent extends EventBase {
   existing_connections: ExistingConnections;
   texture_files: string[];
   suggestions: TextureSuggestions;
+  // Issue #22 Stage 1 — slots filled by the vision-model Layer 3 fallback
+  // (as opposed to Layer 2 filename heuristics). Used to badge those rows
+  // as "vision-derived, please double-check".
+  vision_suggested_slots?: Record<string, string[]>;
+  // Issue #22 Stage 3 — experimental reverse texture inference output.
+  // NEVER auto-applied; surfaced separately with explicit "Apply" buttons
+  // so the user opts in per slot. Empty when the
+  // settings.vision_reverse_inference flag is off.
+  experimental_suggestions?: TextureSuggestions;
 }
 
 export type SseEvent =

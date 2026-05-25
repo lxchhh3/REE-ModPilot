@@ -164,6 +164,46 @@ def test_get_app_config_signals_empty_key(monkeypatch, tmp_path):
 
 @pytest.mark.unit
 @pytest.mark.skipif(TestClient is None, reason="fastapi.testclient unavailable")
+def test_get_app_config_vision_available_false_when_unconfigured(monkeypatch, tmp_path):
+    """vision_available mirrors `settings.vision_model` being set (issue #22 S0)."""
+    _redirect_home(monkeypatch, tmp_path)
+    _patch_blender(monkeypatch)
+    _patch_llm_factory(monkeypatch)
+    from app.config import settings as runtime_settings
+    from app.llm.vision_client import refresh_vision_cache
+    from app.main import app
+
+    runtime_settings.vision_model = ""
+    refresh_vision_cache()
+    with TestClient(app) as client:
+        body = client.get("/app/config").json()
+        assert body["vision_available"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(TestClient is None, reason="fastapi.testclient unavailable")
+def test_get_app_config_vision_available_true_when_configured(monkeypatch, tmp_path):
+    _redirect_home(monkeypatch, tmp_path)
+    _patch_blender(monkeypatch)
+    _patch_llm_factory(monkeypatch)
+    from app.config import settings as runtime_settings
+    from app.llm.vision_client import refresh_vision_cache
+    from app.main import app
+
+    runtime_settings.vision_model = "qwen-vl-max"
+    refresh_vision_cache()
+    try:
+        with TestClient(app) as client:
+            body = client.get("/app/config").json()
+            assert body["vision_available"] is True
+    finally:
+        # Clean up so unrelated tests don't see a leftover vision config.
+        runtime_settings.vision_model = ""
+        refresh_vision_cache()
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(TestClient is None, reason="fastapi.testclient unavailable")
 def test_post_app_config_persists_and_refreshes(monkeypatch, tmp_path):
     """Submitting a full payload writes to ~/.modpilot/config.json AND
     rebuilds app.state.llm via LLMClient.from_settings()."""
@@ -198,6 +238,46 @@ def test_post_app_config_persists_and_refreshes(monkeypatch, tmp_path):
 
         # app.state.llm was rebuilt from our stub factory after the save.
         assert app.state.llm is factory_stub
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(TestClient is None, reason="fastapi.testclient unavailable")
+def test_post_app_config_invalidates_vision_cache(monkeypatch, tmp_path):
+    """A vision_model edit must be visible on the next GET /app/config.
+    Without the cache invalidation in POST, vision_available() would still
+    return the pre-save snapshot. (issue #22 Stage 1)"""
+    _redirect_home(monkeypatch, tmp_path)
+    _patch_blender(monkeypatch)
+    _patch_llm_factory(monkeypatch)
+    from app.config import settings as runtime_settings
+    from app.llm.vision_client import refresh_vision_cache, vision_available
+    from app.main import app
+
+    # Seed the cache as False (no vision model).
+    runtime_settings.vision_model = ""
+    refresh_vision_cache()
+    assert vision_available() is False
+
+    with TestClient(app) as client:
+        r = client.post("/app/config", json={
+            "llm_provider": "openai_compatible",
+            "llm_api_key": "sk-test",
+            "llm_model": "deepseek-chat",
+            "llm_base_url": "https://api.deepseek.com/v1",
+            "blender_host": "127.0.0.1",
+            "blender_port": 9876,
+        })
+        assert r.status_code == 200, r.text
+    # The POST path doesn't touch vision_model here, but the cache MUST have
+    # been invalidated so a follow-up settings mutation is observable.
+    runtime_settings.vision_model = "qwen-vl-max"
+    # No explicit refresh — relies on POST having reset the cache. Next
+    # call should re-read settings and observe the new value.
+    assert vision_available() is True
+
+    # Teardown.
+    runtime_settings.vision_model = ""
+    refresh_vision_cache()
 
 
 @pytest.mark.unit

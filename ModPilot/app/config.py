@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     vision_api_key: str = ""
     vision_base_url: str = ""
 
+    # Issue #22 Stage 3 — experimental reverse texture inference. OFF by
+    # default even when vision_model is configured. When ON, the agent loop
+    # runs an additional VLM pass that maps unassigned textures to materials
+    # via UV-layout overlays. Accuracy >= 70% per spec — all results are
+    # suggestions only, never auto-applied.
+    vision_reverse_inference: bool = False
+
     # App
     app_host: str = "127.0.0.1"
     app_port: int = 8000
