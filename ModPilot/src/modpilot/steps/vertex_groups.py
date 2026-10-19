@@ -63,7 +63,8 @@ def vertex_groups(p: VertexGroupsParams, ctx) -> dict:
     context.object_mode()
     join_prep = join.prepare_for_join(objs)
     context.select_only(objs, active=objs[0])
-    ops.run("object.join")
+    if len(objs) > 1:          # with one mesh object.join has nothing to do and returns CANCELLED
+        ops.run("object.join")
     merged = bpy.context.view_layer.objects.active
     if x == "MMD":
         for name in MMD_FUNCTIONAL_GROUPS:

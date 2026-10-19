@@ -33,6 +33,8 @@ PORTED: frozenset[str] = frozenset({
     "setup_preset_supplement_write", "setup_preset_custom_write", "setup_import_mhwilds",
     # M2.2: T2 tests/diff/test_run1_diff.py (claude_run1 calls 4-5, 2 versions)
     "pose_correction", "skeleton_align",
+    # M2.3: T2 tests/diff/test_run1_diff.py (claude_run1 call 6, 2 versions)
+    "vertex_groups",
 })
 
 #: How a ported query tool's report data becomes the legacy JSON it returned.

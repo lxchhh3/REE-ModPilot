@@ -138,3 +138,13 @@ def test_missing_or_non_mesh_objects_are_a_precondition():
         _run({**PARAMS, "mesh_objects": ["Body", "Nope", "Armature"]})
     assert e.value.category == "precondition"
     assert e.value.details == {"not_found": ["Nope"], "not_mesh": ["Armature"]}
+
+
+def test_a_single_mesh_needs_no_join():
+    # Blender's object.join returns CANCELLED with nothing to join; the legacy tool ignored that
+    _scene()
+    r = _run({**PARAMS, "mesh_objects": ["Body"]})
+    m = bpy.data.objects[r["data"]["merged"]]
+    assert m.name == "Body"
+    assert m.parent.name == "MHWilds_Female Armature"
+    assert "Hips" not in m.vertex_groups
