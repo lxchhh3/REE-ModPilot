@@ -12,6 +12,7 @@ from tests.diff.diffkit import (
     differing_sections,
     fingerprint,
     golden_params,
+    result_differences,
     run_legacy,
     session_and_client,
     start,
@@ -19,12 +20,7 @@ from tests.diff.diffkit import (
 
 pytestmark = pytest.mark.blender
 
-SCENE_DIFF_KEYS = {"object_count", "objects_added", "objects_removed", "materials_count"}
-
-
-def _compare_results(legacy_diff: dict, report: dict) -> dict:
-    new = {**report["data"], **report["scene_diff"]}
-    return {k: (v, new.get(k, "<missing>")) for k, v in legacy_diff.items() if new.get(k, "<missing>") != v}
+_compare_results = result_differences
 
 
 @pytest.mark.parametrize("version", VERSIONS)

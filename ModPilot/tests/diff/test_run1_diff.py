@@ -14,6 +14,7 @@ from tests.diff.diffkit import (
     differing_sections,
     fingerprint,
     golden_params,
+    result_differences,
     run_legacy,
     session_and_client,
     start,
@@ -25,6 +26,7 @@ pytestmark = pytest.mark.blender
 CALLS = {
     4: 4,     # pose_correction
     5: 5,     # skeleton_align
+    6: 6,     # vertex_groups (the BHS outfit's 12 meshes)
 }
 
 
@@ -46,6 +48,5 @@ def test_the_new_step_does_what_the_legacy_tool_did(env, step_index):
     start(session, ck)
     report = session.call(tool, params)
     fp_new = fingerprint(session)
-    new = {**report["data"], **report["scene_diff"]}
-    assert {k: (v, new.get(k)) for k, v in legacy.state_diff.items() if new.get(k) != v} == {}, tool
+    assert result_differences(legacy.state_diff, report) == {}, tool
     assert differing_sections(fp_old, fp_new) == {}, tool

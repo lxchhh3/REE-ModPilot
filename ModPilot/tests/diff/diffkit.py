@@ -99,3 +99,17 @@ def differing_sections(a: dict, b: dict) -> dict:
         if bad:
             out[name] = bad
     return out
+
+
+# The legacy tools' scene-diff keys come from SceneCache, built on blender-mcp's get_scene_info, which
+# lists only the FIRST 10 objects (upstream addon.py: `if i >= 10: break`): in any bigger scene they
+# report objects as added / removed that weren't (ModPilot lesson #57). The new steps snapshot every
+# object; the scene itself is compared by fingerprint, so those legacy keys are not compared.
+LEGACY_SCENE_DIFF_KEYS = {"object_count", "objects_added", "objects_removed", "materials_count"}
+
+
+def result_differences(legacy_diff: dict, report: dict) -> dict:
+    """{key: (legacy, new)} for every key the legacy tool reported (its scene-diff keys aside)."""
+    new = {**report["data"], **report["scene_diff"]}
+    return {k: (v, new.get(k, "<missing>")) for k, v in legacy_diff.items()
+            if k not in LEGACY_SCENE_DIFF_KEYS and new.get(k, "<missing>") != v}

@@ -5,7 +5,7 @@
 > **Keep it thin.** Each lesson is ONE trimmed bullet (≤3 lines / ≤300 chars) carrying a stable
 > `#NN`. IDs are never renumbered or reused — cross-refs point here. Depth for the deep ones
 > (`→detail`) lives in [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md); open it **by ID**,
-> never wholesale. Highest ID so far = **#56**; the next new lesson is #57.
+> never wholesale. Highest ID so far = **#57**; the next new lesson is #58.
 > Episodic "what happened / what shipped" narrative belongs in the context-manager, not here.
 
 ---
@@ -89,6 +89,7 @@ uv run python tests/e2e/error_choice_ui.py
      ≤3 lines, ≤300 chars, stable #NN, newest at top. Depth → docs/dev/lessons-detail.md by ID.
      A PreToolUse hook gates this format on every Edit/Write. -->
 
+- **#57** The legacy tools' scene diff (objects_added / removed / count) is built on blender-mcp `get_scene_info`, which lists only the FIRST 10 objects: past 10 objects it reports adds and removes that never happened. The new core snapshots every object; compare scenes by fingerprint.
 - **#56** Blender 4 renamed Principled 'Emission' to 'Emission Color' and defaults Emission Strength to 0, which the Toolkit's generator reads as not emissive: material_setup skipped every emission map. Look slots up by alias; turn a zero strength on.
 - **#55** RE Chain Editor has no 'RE_CHAIN_CHAINNODE' type, node `parent_bone` or group `chainSetting`; SHARED mode and collider_create used them and got nothing back (every chain the first type, every head ''). Head = first RE_CHAIN_NODE child's BoneName; settings = parent.
 - **#54** Hips poke through a hanging skirt's back: Dimi pre-rotates the limit CONES of the back/side strands 13° (frame rotation = angleLimitDirection) and cone-limits their top joints (15/30/45/60). Only front strands get Free tops. Sampling 2 front strands to copy all 12 broke it.
