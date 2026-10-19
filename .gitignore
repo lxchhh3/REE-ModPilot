@@ -138,3 +138,6 @@ _study/
 # Reference mods (Dimi's BHS_fixed, BHS materials, in-game captures; ~900 MB). Third-party
 # work kept on disk for comparison only: never commit it, the fork is public (2026-10-19).
 Ref/
+
+# pytest for Blender's own Python (pure-python, `uv pip install --target ModPilot/.bldeps pytest`).
+ModPilot/.bldeps/

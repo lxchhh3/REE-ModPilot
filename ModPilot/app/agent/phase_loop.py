@@ -73,9 +73,21 @@ logger = logging.getLogger(__name__)
 
 
 _TOOL_CATALOG_CACHE: dict[str, PhaseTool] | None = None
+_LEGACY_CATALOG_CACHE: dict[str, PhaseTool] | None = None
 
 
 def build_full_tool_catalog() -> dict[str, PhaseTool]:
+    """The catalog the agent loop and tools-5.2 use: the legacy tools, with every tool the
+    restructure has ported (app.phases._bridge.PORTED) running as its new in-Blender step.
+    """
+    global _TOOL_CATALOG_CACHE
+    if _TOOL_CATALOG_CACHE is None:
+        from app.phases._bridge import wrap
+        _TOOL_CATALOG_CACHE = wrap(legacy_tool_catalog())
+    return _TOOL_CATALOG_CACHE
+
+
+def legacy_tool_catalog() -> dict[str, PhaseTool]:
     """Return the complete `{tool_name: tool_instance}` registry.
 
     Single source of truth — both `PhaseLoop._register_available_phases` and
@@ -88,9 +100,9 @@ def build_full_tool_catalog() -> dict[str, PhaseTool]:
     handing back the same instances across calls is safe and lets tests
     do identity comparisons (`loop._phase_tools["x"] is other._phase_tools["x"]`).
     """
-    global _TOOL_CATALOG_CACHE
-    if _TOOL_CATALOG_CACHE is not None:
-        return _TOOL_CATALOG_CACHE
+    global _LEGACY_CATALOG_CACHE
+    if _LEGACY_CATALOG_CACHE is not None:
+        return _LEGACY_CATALOG_CACHE
     from app.phases.batch_export import BatchExport
     from app.phases.infer_model_type import InferModelType
     from app.phases.material import (
@@ -162,8 +174,8 @@ def build_full_tool_catalog() -> dict[str, PhaseTool]:
         ListMdfPresets(),
         PhysicsRead(),
     ]
-    _TOOL_CATALOG_CACHE = {tool.name: tool for tool in tools}
-    return _TOOL_CATALOG_CACHE
+    _LEGACY_CATALOG_CACHE = {tool.name: tool for tool in tools}
+    return _LEGACY_CATALOG_CACHE
 
 
 class PhaseLoop:

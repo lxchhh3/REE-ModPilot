@@ -27,9 +27,13 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["src"]
+# tests/bl run INSIDE Blender (python -m modpilot_host.bpytest, or tests/blender/test_in_blender.py)
+addopts = "--ignore=tests/bl"
 markers = [
     "unit: fast tests, no external services required",
     "integration: requires real Blender on port 9876",
+    "blender: launches a headless Blender (tests/bl, tests/diff, tests/blender)",
 ]
 testpaths = ["tests"]
 
