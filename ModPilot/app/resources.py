@@ -37,10 +37,11 @@ def resource_root() -> Path:
 
 
 def app_data_dir() -> Path:
-    """Directory holding bundled JSON catalogs (armor_sets.json, physics_presets.json)."""
+    """Directory holding bundled JSON catalogs (armor_sets.json, physics_presets.json): the modpilot
+    package's data folder, the only copy (src/modpilot/data)."""
     if is_frozen():
         return resource_root() / "app" / "data"
-    return Path(__file__).resolve().parent / "data"
+    return Path(__file__).resolve().parent.parent / "src" / "modpilot" / "data"
 
 
 def docs_dir() -> Path:

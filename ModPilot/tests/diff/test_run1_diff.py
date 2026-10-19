@@ -27,6 +27,10 @@ CALLS = {
     4: 4,     # pose_correction
     5: 5,     # skeleton_align
     6: 6,     # vertex_groups (the BHS outfit's 12 meshes)
+    7: 7,     # physics_transplant
+    8: 8,     # physics_classification
+    9: 9,     # physics_chains prepare_only
+    10: 10,   # physics_chains: 66 heads typed, 18 bones merged, SEPARATE settings
 }
 
 

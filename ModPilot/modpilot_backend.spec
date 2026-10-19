@@ -42,7 +42,7 @@ hidden = (
 #   - The (source, dest_within_bundle) tuples mirror the layout
 #     app/resources.py expects under sys._MEIPASS.
 datas = [
-    (str(REPO_ROOT / "ModPilot" / "app" / "data"), "app/data"),
+    (str(REPO_ROOT / "ModPilot" / "src" / "modpilot" / "data"), "app/data"),
     (str(REPO_ROOT / "docs" / "agent_workflow.md"), "docs"),
     (str(REPO_ROOT / "ModPilot" / "app" / "static_built"), "app/static_built"),
 ]
