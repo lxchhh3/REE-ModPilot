@@ -150,12 +150,20 @@ def test_session_config_accepts_runtime_preset(monkeypatch, tmp_path):
     _patch_blender(monkeypatch)
     _patch_llm(monkeypatch)
     paths = _valid_paths(tmp_path)
-    update_x_presets({"MMD", "VRChat", "怪猎荒野"})  # simulate post-startup state
 
     from app.main import app
 
     with TestClient(app) as client:
-        resp = _post_config(client, session_id="s2", paths=paths, model_type="怪猎荒野")
+        # The lifespan re-seeds X_PRESETS (shipped fallback when Blender discovery
+        # fails), so add the runtime-only preset AFTER startup. Seeding before the
+        # `with` was silently overwritten; it only passed while the fallback list
+        # happened to contain the chosen name.
+        saved = set(X_PRESETS)
+        update_x_presets(saved | {"VRChat_extended"})
+        try:
+            resp = _post_config(client, session_id="s2", paths=paths, model_type="VRChat_extended")
+        finally:
+            update_x_presets(saved)
     assert resp.status_code == 200
 
 

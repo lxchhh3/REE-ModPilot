@@ -5,10 +5,12 @@ the scene has no collider objects at all, so the masks are inert. Phase 4C
 fills both halves:
 
   Step 1  ColliderCreate (sub-step, advances_phase=False)
-    Calls Wilds Chain Editor's `re_chain.create_full_body_clsp` operator
-    which imports the bundled `full_body.clsp.3` preset, materialises one
-    capsule/sphere per MHWilds body bone, and CHILD_OF-constrains each to
-    its bone. Then scans the scene for the new colliders + every existing
+    Imports ModPilot's bundled `app/data/full_body.clsp.3` (byte-identical to
+    the preset the MHWilds_Chain_Editor fork shipped behind its
+    `re_chain.create_full_body_clsp`, an operator RE Chain Editor never had)
+    through RE Chain Editor's `re_clsp.importfile`, bound to the MH Wilds
+    armature (`target_armature`). That materialises one capsule/sphere per MHWilds body bone and
+    CHILD_OF-constrains each to its bone. Then scans the scene for the new colliders + every existing
     RE_CHAIN_CHAINGROUP (with parent_bone + current clspFlags0/1) so the
     LLM has the data needed for Step 2 classification.
 
@@ -36,6 +38,7 @@ from typing import Any
 from app.blender.client import BLENDER_SENTINEL, BlenderClient, BlenderError
 from app.blender.state import SceneCache
 from app.phases.base import PhaseError, PhaseResult, PhaseTool
+from app.phases.setup import _MHWILDS_ARMATURE
 from app.resources import app_data_dir
 
 # ── body-bit catalog ────────────────────────────────────────────────────────
@@ -52,7 +55,7 @@ def _load_bits() -> dict:
 
 
 def list_body_bit_keys() -> list[str]:
-    """All 20 body-part keys in catalog order."""
+    """All body-part keys in catalog order (one per collider of full_body.clsp.3)."""
     return list(_load_bits()["bits"].keys())
 
 
@@ -77,12 +80,21 @@ def keys_for_mask(mask: int) -> list[str]:
     return [k for k, e in bits.items() if mask & e["bit"]]
 
 
-_FULL_MASK = 0xFFFFF  # 20 low bits — anything above is not a valid body-part mask
+# Every bit a collider of full_body.clsp.3 carries: the 20 body regions 0x1..0x80000 plus the
+# wide hip sphere 0x800000 (bit 23, ModPilot lesson #50). A mask with any other bit selects nothing.
+_FULL_MASK = 0
+for _entry in _load_bits()["bits"].values():
+    _FULL_MASK |= _entry["bit"]
+
+
+def _valid_mask(value: int) -> bool:
+    return value >= 0 and value & ~_FULL_MASK == 0
 
 
 # ── operator constants ──────────────────────────────────────────────────────
 
-_OP_CREATE_FULL_BODY_CLSP = "re_chain.create_full_body_clsp"
+_OP_IMPORT_CLSP = "re_clsp.importfile"
+_FULL_BODY_CLSP_PATH = app_data_dir() / "full_body.clsp.3"
 
 
 # ── Step 1: ColliderCreate ──────────────────────────────────────────────────
@@ -112,7 +124,8 @@ class ColliderCreate(PhaseTool):
             "description": (
                 "Phase 4C Step 1: Import the MHWilds full-body collider preset "
                 "(capsules/spheres CHILD_OF-constrained to body bones) via "
-                "Wilds Chain Editor's re_chain.create_full_body_clsp operator. "
+                "RE Chain Editor's re_clsp.importfile (bundled full_body.clsp.3, "
+                "bound to target_armature). "
                 "Returns the list of created colliders plus every existing "
                 "RE_CHAIN_CHAINGROUP with its parent_bone — feed that into a "
                 "user-confirmation step, then call collider_apply with the "
@@ -122,6 +135,13 @@ class ColliderCreate(PhaseTool):
             "input_schema": {
                 "type": "object",
                 "properties": {
+                    "target_armature": {
+                        "type": "string",
+                        "description": (
+                            "MHWilds ARMATURE object the colliders bind to. Defaults to "
+                            f"'{_MHWILDS_ARMATURE}' (what setup_import_mhwilds creates)."
+                        ),
+                    },
                     "chain_collection": {
                         "type": "string",
                         "description": (
@@ -142,16 +162,17 @@ class ColliderCreate(PhaseTool):
         params: dict,
     ) -> PhaseResult:
         chain_col = params.get("chain_collection", "") or ""
+        target_arm = params.get("target_armature", "") or _MHWILDS_ARMATURE
 
         state_before = cache.refresh()
 
         try:
-            err, info = self._run_full_body_clsp(client, chain_col)
+            err, info = self._run_full_body_clsp(client, chain_col, target_arm)
         except BlenderError as exc:
             return PhaseResult.fail(
                 PhaseError(
                     category="unexpected",
-                    operator=_OP_CREATE_FULL_BODY_CLSP,
+                    operator=_OP_IMPORT_CLSP,
                     message="Blender error during full-body collider import.",
                     raw=str(exc),
                 )
@@ -160,7 +181,7 @@ class ColliderCreate(PhaseTool):
             return PhaseResult.fail(
                 PhaseError(
                     category="timeout",
-                    operator=_OP_CREATE_FULL_BODY_CLSP,
+                    operator=_OP_IMPORT_CLSP,
                     message="Lost connection to Blender during collider import.",
                     raw=str(exc),
                 )
@@ -178,20 +199,24 @@ class ColliderCreate(PhaseTool):
         self,
         client: BlenderClient,
         chain_col_hint: str,
+        target_armature: str,
     ) -> tuple[PhaseError | None, dict]:
-        """Run create_full_body_clsp + scan the scene.
+        """Import the bundled full_body.clsp.3 via re_clsp.importfile + scan the scene.
 
         Output line shape (one of):
-          MISSING_OP:re_chain.create_full_body_clsp
+          MISSING_OP:re_clsp.importfile
+          NO_ARMATURE:<target_armature>
           CANCELLED:<ret>
           FULL_BODY:<json with colliders, chain_groups, clsp_collection>
         """
         code = (
             f"import bpy, json\n"
-            f"op = getattr(bpy.ops.re_chain, 'create_full_body_clsp', None)\n"
-            f"if op is None:\n"
+            # getattr(bpy.ops.<ns>, '<op>', None) is never None (bpy.ops hands back a
+            # stub for any name), so registration must be checked with dir().
+            f"_has_op = 'importfile' in dir(bpy.ops.re_clsp)\n"
+            f"if not _has_op:\n"
             f"    print({BLENDER_SENTINEL!r})\n"
-            f"    print('MISSING_OP:re_chain.create_full_body_clsp')\n"
+            f"    print('MISSING_OP:re_clsp.importfile')\n"
             f"else:\n"
             # Snapshot collision-shape objects before import so we can diff.
             f"    before = {{o.name for o in bpy.data.objects\n"
@@ -199,13 +224,24 @@ class ColliderCreate(PhaseTool):
             f"                                   'RE_CHAIN_COLLISION_SPHERE',\n"
             f"                                   'RE_CHAIN_COLLISION_OBB',\n"
             f"                                   'RE_CHAIN_COLLISION_SHAPE')}}\n"
+            # Bind to the named MH Wilds armature, never the active object: after Phase 4B
+            # the avatar's armature is in the scene too and none is active, so RE Chain
+            # Editor cancelled ("More than one armature was found"; tools-5.2 L3, 2026-10-12).
+            f"    _arm = bpy.data.objects.get({target_armature!r})\n"
             f"    try:\n"
-            f"        ret = op()\n"
+            f"        if _arm is None or _arm.type != 'ARMATURE':\n"
+            f"            ret = None\n"
+            f"        else:\n"
+            f"            ret = bpy.ops.re_clsp.importfile(\n"
+            f"                filepath={str(_FULL_BODY_CLSP_PATH)!r}, targetArmature=_arm.data.name)\n"
             f"    except Exception as _e:\n"
             f"        print({BLENDER_SENTINEL!r})\n"
             f"        print('OP_ERR:' + str(_e)[:160])\n"
             f"    else:\n"
-            f"        if 'FINISHED' not in str(ret):\n"
+            f"        if ret is None:\n"
+            f"            print({BLENDER_SENTINEL!r})\n"
+            f"            print('NO_ARMATURE:' + {target_armature!r})\n"
+            f"        elif 'FINISHED' not in str(ret):\n"
             f"            print({BLENDER_SENTINEL!r})\n"
             f"            print('CANCELLED:' + str(ret))\n"
             f"        else:\n"
@@ -241,15 +277,14 @@ class ColliderCreate(PhaseTool):
             f"                if o.get('TYPE') != 'RE_CHAIN_CHAINGROUP': continue\n"
             f"                if hint_obj_names is not None and o.name not in hint_obj_names:\n"
             f"                    continue\n"
+            # The group's head bone: its first RE_CHAIN_NODE child's BoneName constraint
+            # (RE Chain Editor's own read). The old scan looked for 'RE_CHAIN_CHAINNODE'
+            # children with a parent_bone property, neither of which exists: every head read ''.
             f"                parent_bone = ''\n"
-            f"                for child in o.children:\n"
-            f"                    if child.get('TYPE') != 'RE_CHAIN_CHAINNODE': continue\n"
-            f"                    for pname in ('re_chain_chainnode', 're_chain_chainnodesettings'):\n"
-            f"                        pg = getattr(child, pname, None)\n"
-            f"                        if pg is not None and getattr(pg, 'parent_bone', ''):\n"
-            f"                            parent_bone = pg.parent_bone\n"
-            f"                            break\n"
-            f"                    if parent_bone: break\n"
+            f"                node = next((c for c in o.children if c.get('TYPE') == 'RE_CHAIN_NODE'), None)\n"
+            f"                con = node.constraints.get('BoneName') if node is not None else None\n"
+            f"                if con is not None:\n"
+            f"                    parent_bone = con.subtarget\n"
             f"                cg_pg = getattr(o, 're_chain_chaingroup', None)\n"
             f"                f0 = getattr(cg_pg, 'clspFlags0', -1) if cg_pg else -1\n"
             f"                f1 = getattr(cg_pg, 'clspFlags1', 0) if cg_pg else 0\n"
@@ -270,7 +305,7 @@ class ColliderCreate(PhaseTool):
             return (
                 PhaseError(
                     category="operator_failed",
-                    operator=_OP_CREATE_FULL_BODY_CLSP,
+                    operator=_OP_IMPORT_CLSP,
                     message="collider_create returned no output from Blender.",
                 ),
                 {},
@@ -281,16 +316,29 @@ class ColliderCreate(PhaseTool):
             return (
                 PhaseError(
                     category="precondition",
-                    operator=_OP_CREATE_FULL_BODY_CLSP,
+                    operator=_OP_IMPORT_CLSP,
                     message=(
-                        "Operator 're_chain.create_full_body_clsp' is not registered. "
-                        "The Wilds Chain Editor plugin is required for Phase 4C."
+                        "Operator 're_clsp.importfile' is not registered. "
+                        "RE Chain Editor is required for Phase 4C."
                     ),
                     suggestion=(
-                        "Install the Wilds Chain Editor add-on "
-                        "(MHWilds_Chain_Editor) in Blender's Add-ons preferences, "
-                        "then retry. The add-on ships the full_body.clsp.3 preset "
-                        "and the create_full_body_clsp operator that imports it."
+                        "Install and enable RE Chain Editor (NSACloud/RE-Chain-Editor) "
+                        "in Blender's Add-ons preferences, then retry. ModPilot imports "
+                        "its bundled full_body.clsp.3 through re_clsp.importfile."
+                    ),
+                ),
+                {},
+            )
+        if head.startswith("NO_ARMATURE:"):
+            name = head[len("NO_ARMATURE:"):]
+            return (
+                PhaseError(
+                    category="precondition",
+                    operator=_OP_IMPORT_CLSP,
+                    message=f"Target armature {name!r} is not an ARMATURE object in the scene.",
+                    suggestion=(
+                        "Pass target_armature: the MH Wilds armature the chains were built on "
+                        f"('{_MHWILDS_ARMATURE}' after setup_import_mhwilds)."
                     ),
                 ),
                 {},
@@ -299,8 +347,8 @@ class ColliderCreate(PhaseTool):
             return (
                 PhaseError(
                     category="operator_failed",
-                    operator=_OP_CREATE_FULL_BODY_CLSP,
-                    message="create_full_body_clsp raised an exception.",
+                    operator=_OP_IMPORT_CLSP,
+                    message="re_clsp.importfile raised an exception.",
                     raw=head[len("OP_ERR:"):],
                 ),
                 {},
@@ -309,11 +357,12 @@ class ColliderCreate(PhaseTool):
             return (
                 PhaseError(
                     category="operator_failed",
-                    operator=_OP_CREATE_FULL_BODY_CLSP,
-                    message=f"create_full_body_clsp did not FINISH: {head}",
+                    operator=_OP_IMPORT_CLSP,
+                    message=f"re_clsp.importfile did not FINISH: {head}",
                     suggestion=(
                         "Check Blender's Info editor for the error message. "
-                        "Common causes: no active armature, missing preset file, "
+                        "Common causes: target_armature is not the MH Wilds armature, "
+                        "missing preset file, "
                         "or naming collision with an existing clsp collection."
                     ),
                 ),
@@ -327,7 +376,7 @@ class ColliderCreate(PhaseTool):
                 return (
                     PhaseError(
                         category="unexpected",
-                        operator=_OP_CREATE_FULL_BODY_CLSP,
+                        operator=_OP_IMPORT_CLSP,
                         message="Could not parse collider_create scan output.",
                         raw=str(exc),
                     ),
@@ -336,7 +385,7 @@ class ColliderCreate(PhaseTool):
         return (
             PhaseError(
                 category="unexpected",
-                operator=_OP_CREATE_FULL_BODY_CLSP,
+                operator=_OP_IMPORT_CLSP,
                 message=f"Unexpected collider_create output: {head!r}",
             ),
             {},
@@ -358,7 +407,7 @@ def _normalise_flag_entry(value: Any) -> tuple[int, int] | None:
     if isinstance(value, bool):  # bool is a subclass of int in Python
         return None
     if isinstance(value, int):
-        if not (0 <= value <= _FULL_MASK):
+        if not _valid_mask(value):
             return None
         return value, 0
     if isinstance(value, dict):
@@ -368,7 +417,7 @@ def _normalise_flag_entry(value: Any) -> tuple[int, int] | None:
             return None
         if not isinstance(f0, int) or not isinstance(f1, int):
             return None
-        if not (0 <= f0 <= _FULL_MASK) or not (0 <= f1 <= _FULL_MASK):
+        if not _valid_mask(f0) or not _valid_mask(f1):
             return None
         return f0, f1
     return None
@@ -403,8 +452,9 @@ class ColliderApply(PhaseTool):
             "description": (
                 "Phase 4C Step 3: Write the user-confirmed clspFlags0 / "
                 "clspFlags1 collision masks onto each RE_CHAIN_CHAINGROUP "
-                "object. Advances the phase. Values are 20-bit body-region "
-                "masks; see app/data/clsp_body_bits.json for the bit layout."
+                "object. Advances the phase. Values are masks over the "
+                "colliders of full_body.clsp.3: the 20 body regions plus "
+                "hip_wide (0x800000); see app/data/clsp_body_bits.json for the bit layout."
             ),
             "input_schema": {
                 "type": "object",
@@ -416,7 +466,8 @@ class ColliderApply(PhaseTool):
                             "value. Each value is either an int (sets "
                             "clspFlags0 only; clspFlags1 stays 0) or a dict "
                             "{\"clspFlags0\": int, \"clspFlags1\": int}. "
-                            "Both fields are 20-bit masks; pass 0 to disable "
+                            "Both fields are collider masks (bits from "
+                            "clsp_body_bits.json only); pass 0 to disable "
                             "all collisions for that group (the recommended "
                             "default for unsure cases)."
                         ),
@@ -461,8 +512,8 @@ class ColliderApply(PhaseTool):
                     category="precondition",
                     operator="",
                     message=(
-                        "Invalid chain_flags entries (each value must be a 20-bit "
-                        f"int in [0, 0x{_FULL_MASK:X}] or a dict with clspFlags0/1): "
+                        "Invalid chain_flags entries (each value must be an int using "
+                        f"only the collider bits 0x{_FULL_MASK:X} or a dict with clspFlags0/1): "
                         + ", ".join(bad_entries)
                     ),
                 )

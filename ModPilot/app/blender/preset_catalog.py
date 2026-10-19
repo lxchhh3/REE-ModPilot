@@ -41,7 +41,8 @@ from app.blender.client import BLENDER_SENTINEL, BlenderClient
 # server startup, and as the default test fixture for unit tests that don't
 # go through the lifespan handler.
 #
-# Note: the toolkit folder also contains 街霸6.json, but it declares
+# Stems as of Modding-Toolkit 2.8.5 (a31fb82 renamed presets to ASCII file names).
+# Note: the toolkit folder also contains sf6.json, but it declares
 # `preset_info.type = "Y_PRESET"` (target-game preset) despite living in
 # the import/ folder. enumerate_x_presets() correctly filters it out;
 # we mirror that filter here.
@@ -53,18 +54,21 @@ OPTIONAL_SLOTS: frozenset[str] = frozenset({"spine_03"})
 
 SHIPPED_X_PRESETS: tuple[str, ...] = (
     "MMD",
+    "RE6",
     "VRChat",
-    "Valve社",
-    "怪猎世界",
-    "怪猎崛起",
-    "怪猎荒野",
-    "生化危机4",
-    "生化危机9",
-    "碧蓝幻想",
-    "终末地",
-    "绝地潜兵2",
-    "赛马娘",
-    "鬼泣5",
+    "arknights",
+    "dmc5",
+    "dmc5_alt",
+    "gbf",
+    "hd2",
+    "mhwi_world",
+    "mhwr",
+    "mhws",
+    "re4",
+    "re9",
+    "uma",
+    "valve",
+    "vrm",
 )
 
 # Candidate addon folder names. Modding-Toolkit installs under different

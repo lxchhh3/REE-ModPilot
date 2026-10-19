@@ -27,6 +27,7 @@ mhws.auto_create_chains calling convention (post-toolkit patch):
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from app.blender.client import BLENDER_SENTINEL, BlenderClient, BlenderError
@@ -40,6 +41,8 @@ from app.phases.base import (
     require_finished,
 )
 from app.resources import app_data_dir
+
+logger = logging.getLogger(__name__)
 
 # ── physics presets loader ────────────────────────────────────────────────────
 
@@ -77,6 +80,8 @@ def list_inferred_types() -> list[str]:
 _OP_SMART_GRAFT = "modder.smart_graft"
 _OP_REFRESH_COLORS = "modder.refresh_physics_bone_colors"
 _OP_AUTO_CHAINS = "mhws.auto_create_chains"
+# Toolkit X preset for the MHWilds skeleton (2.8.5 file stem; display name 怪猎荒野).
+_WILDS_X_PRESET_FILE = "mhws.json"
 
 # colliderFilterInfoPath used for all MHWilds chain settings objects
 _DEFAULT_COLLIDER_PATH = (
@@ -85,6 +90,68 @@ _DEFAULT_COLLIDER_PATH = (
 
 
 # ── Phase 3.5 ─────────────────────────────────────────────────────────────────
+
+# smart_graft gives a physics LEAF its '<leaf>_End' bone only when the leaf carries weights in a
+# mesh still deformed by the SOURCE armature. ModPilot runs vertex_groups (Phase 3) first, which
+# has already moved every mesh onto the MH Wilds armature, so no leaf got one, and physics_chains
+# (which closes a chain only at an '_End') skipped every single-bone chain and dropped the last
+# segment of the others (34 chains in claude_run1, ModPilot lesson #49; the GG ribbons and skirt
+# strands, Blender-MHWilds lesson #38). This finishes the job with smart_graft's own rule
+# (mhws target: a leaf = no grafted physics child; it needs an _End when it has weights), reading
+# the weights where the meshes are now, and smart_graft's own geometry: head on the source leaf's
+# world tail, 5 cm straight up, roll 0, parented to the grafted leaf. Forks are smart_graft's job
+# (they get an _End without any weight test) and are left to it.
+END_BONES_SRC = '''
+import json
+
+import mathutils
+
+
+def _add_missing_end_bones(src, tgt):
+    try:
+        protected = set(json.loads(tgt.get("transplant_protected_bones", "[]")))
+    except (TypeError, ValueError):
+        protected = set()
+    grafted = {b.name for b in src.data.bones if b.name in tgt.data.bones and b.name not in protected
+               and not b.name.endswith("_End")}
+    meshes = [o for o in bpy.data.objects if o.type == "MESH" and (o.parent is tgt or any(
+        m.type == "ARMATURE" and m.object is tgt for m in o.modifiers))]
+
+    def weighted(name):
+        for o in meshes:
+            g = o.vertex_groups.get(name)
+            if g is None:
+                continue
+            for v in o.data.vertices:
+                for e in v.groups:
+                    if e.group == g.index and e.weight > 0:
+                        return True
+        return False
+
+    leaves = [n for n in sorted(grafted)
+              if not any(c.name in grafted for c in src.data.bones[n].children)
+              and n + "_End" not in tgt.data.bones and weighted(n)]
+    if not leaves:
+        return []
+    was_active = bpy.context.view_layer.objects.active
+    hidden = tgt.hide_get()
+    tgt.hide_set(False)
+    bpy.context.view_layer.objects.active = tgt
+    bpy.ops.object.mode_set(mode="EDIT")
+    eb = tgt.data.edit_bones
+    inv = tgt.matrix_world.inverted()
+    for n in leaves:
+        end = eb.new(n + "_End")
+        end.head = inv @ (src.matrix_world @ src.pose.bones[n].tail)
+        end.tail = end.head + mathutils.Vector((0.0, 0.0, 0.05))
+        end.roll = 0.0
+        end.parent = eb[n]
+        end.use_connect = False
+    bpy.ops.object.mode_set(mode="OBJECT")
+    tgt.hide_set(hidden)
+    bpy.context.view_layer.objects.active = was_active
+    return [n + "_End" for n in leaves]
+'''
 
 
 class PhysicsTransplant(PhaseTool):
@@ -96,6 +163,8 @@ class PhysicsTransplant(PhaseTool):
       - Auto-generates _End bones, verticalizes them (Z+).
       - Rebuilds parent hierarchy using standard key bridging.
       - Copies chain_role custom properties from source to target.
+    Then adds the '_End' bones smart_graft skipped for weighted leaves, because the meshes it
+    reads weights from were already moved by Phase 3 (END_BONES_SRC, ModPilot lesson #49).
     """
 
     @property
@@ -128,13 +197,13 @@ class PhysicsTransplant(PhaseTool):
                     },
                     "x_preset": {
                         "type": "string",
-                        "enum": ["MMD", "VRChat", "终末地"],
+                        "enum": ["MMD", "VRChat", "arknights"],
                         "description": "Source model preset (X) for standard key bridging.",
                     },
                     "y_preset": {
                         "type": "string",
-                        "enum": ["怪猎荒野"],
-                        "description": "Target game preset (Y). Always 怪猎荒野 for MHWs.",
+                        "enum": ["mhws"],
+                        "description": "Target game preset (Y). Always mhws for MHWs.",
                     },
                 },
                 "required": ["source_armature", "target_armature", "x_preset"],
@@ -182,7 +251,7 @@ class PhysicsTransplant(PhaseTool):
         state_before = cache.refresh()
 
         try:
-            err = self._run_smart_graft(client, source_arm, target_arm, x_preset, y_preset)
+            err, end_bones = self._run_smart_graft(client, source_arm, target_arm, x_preset, y_preset)
             if err is not None:
                 return PhaseResult.fail(err)
         except BlenderError as exc:
@@ -205,7 +274,9 @@ class PhysicsTransplant(PhaseTool):
             )
 
         state_after = cache.refresh()
-        return PhaseResult.ok(state_before.diff(state_after))
+        diff = state_before.diff(state_after)
+        diff["end_bones_added"] = end_bones
+        return PhaseResult.ok(diff)
 
     def _run_smart_graft(
         self,
@@ -214,9 +285,12 @@ class PhysicsTransplant(PhaseTool):
         target_arm: str,
         x_preset: str,
         y_preset: str,
-    ) -> PhaseError | None:
+    ) -> tuple[PhaseError | None, list[str]]:
+        """Run smart_graft, then add the '_End' bones it could not (END_BONES_SRC).
+        Returns (error or None, names of the _End bones added)."""
         code = (
             f"import bpy\n"
+            f"{END_BONES_SRC}\n"
             f"src = bpy.data.objects.get({source_arm!r})\n"
             f"tgt = bpy.data.objects.get({target_arm!r})\n"
             f"missing = []\n"
@@ -235,13 +309,17 @@ class PhysicsTransplant(PhaseTool):
             f"    src.select_set(True)\n"
             f"    tgt.select_set(True)\n"
             f"    ret = bpy.ops.{_OP_SMART_GRAFT}()\n"
+            f"    ends = []\n"
             f"    if 'FINISHED' in str(ret):\n"
+            # Step 3.5: '_End' bones for the weighted leaves smart_graft could not see (END_BONES_SRC)
+            f"        ends = _add_missing_end_bones(src, tgt)\n"
             # Step 4: hide source armature — no longer needed after transplant
             f"        src.hide_viewport = True\n"
             # Step 5: switch X preset to MHWilds for all downstream ops
             f"        settings.import_preset_enum = {(y_preset + '.json')!r}\n"
             f"    print({BLENDER_SENTINEL!r})\n"
             f"    print(ret)\n"
+            f"    print('END_BONES:' + json.dumps(ends, ensure_ascii=False))\n"
         )
         lines = client.execute_and_extract(code)
         if lines and lines[0].startswith("PRECONDITION:"):
@@ -251,8 +329,15 @@ class PhysicsTransplant(PhaseTool):
                 operator=_OP_SMART_GRAFT,
                 message=f"Armature not found: {detail}",
                 suggestion="Ensure both source and MHWilds armatures are in the scene.",
-            )
-        return require_finished(lines, _OP_SMART_GRAFT)
+            ), []
+        ends: list[str] = []
+        for line in lines[1:]:
+            if line.startswith("END_BONES:"):
+                try:
+                    ends = json.loads(line[len("END_BONES:"):])
+                except json.JSONDecodeError:
+                    ends = []
+        return require_finished(lines, _OP_SMART_GRAFT), ends
 
 
 # ── Phase 4A ─────────────────────────────────────────────────────────────────
@@ -355,7 +440,7 @@ class PhysicsClassification(PhaseTool):
         client: BlenderClient,
         target_arm: str,
     ) -> tuple[PhaseError | None, dict]:
-        # After Phase 3.5, X preset is switched to MHWilds (怪猎荒野).
+        # After Phase 3.5, X preset is switched to MHWilds (_WILDS_X_PRESET_FILE).
         # refresh_physics_bone_colors identifies physics bones as those NOT in the
         # MHWilds preset list — exactly what we want post-transplant.
         # Each step is wrapped in try/except so Blender errors surface as readable
@@ -368,7 +453,7 @@ class PhysicsClassification(PhaseTool):
             f"    print('PRECONDITION:not_found:{target_arm}')\n"
             f"else:\n"
             f"    settings = bpy.context.scene.mhw_suite_settings\n"
-            f"    settings.import_preset_enum = '怪猎荒野.json'\n"
+            f"    settings.import_preset_enum = {_WILDS_X_PRESET_FILE!r}\n"
             f"    bpy.context.view_layer.objects.active = arm_obj\n"
             f"    bpy.ops.object.mode_set(mode='OBJECT')\n"
             f"    bpy.ops.object.select_all(action='DESELECT')\n"
@@ -829,8 +914,9 @@ class PhysicsChains(PhaseTool):
                 )
             if new_cs_names:
                 if settings_mode == "SEPARATE":
-                    # One CS per chain — apply params in alphabetical bone order
-                    # (consistent with operator iteration order)
+                    # One CS per chain — each CS gets its own chain head bone's
+                    # params; a CS whose head has no inferred_type is left
+                    # untouched and reported in skipped_params.
                     skipped = self._apply_params_to_chain_settings(
                         client, new_cs_names, inferred_types, resolved, "SEPARATE"
                     )
@@ -1136,8 +1222,11 @@ class PhysicsChains(PhaseTool):
             f"    missing = []\n"
             f"    for name in bone_names:\n"
             f"        pb = arm_obj.pose.bones.get(name)\n"
-            f"        if pb: pb.bone.select = True\n"
-            f"        else: missing.append(name)\n"
+            # Blender 4 keeps pose-mode selection on the Bone, Blender 5 moved it to the
+            # PoseBone (as Modding-Toolkit's re_chain_utils._make_one_chain handles).
+            f"        if pb is None: missing.append(name)\n"
+            f"        elif hasattr(pb, 'select'): pb.select = True\n"
+            f"        else: pb.bone.select = True\n"
             f"    ret = bpy.ops.{_OP_CLEAR_ROLE}()\n"
             f"    bpy.ops.object.mode_set(mode='OBJECT')\n"
             f"    print({BLENDER_SENTINEL!r})\n"
@@ -1256,7 +1345,10 @@ class PhysicsChains(PhaseTool):
             f"    bpy.ops.pose.select_all(action='DESELECT')\n"
             f"    for name in bone_names:\n"
             f"        pb = arm_obj.pose.bones.get(name)\n"
-            f"        if pb: pb.bone.select = True\n"
+            # Bone.select (Blender 4) vs PoseBone.select (Blender 5), as above.
+            f"        if pb is None: continue\n"
+            f"        if hasattr(pb, 'select'): pb.select = True\n"
+            f"        else: pb.bone.select = True\n"
             f"    ret = bpy.ops.{op}()\n"
             f"    bpy.ops.object.mode_set(mode='OBJECT')\n"
             f"    print({BLENDER_SENTINEL!r})\n"
@@ -1346,7 +1438,7 @@ class PhysicsChains(PhaseTool):
             # select armature in POSE mode, call auto_create_chains without kwarg
             f"    bpy.context.scene.re_chain_toolpanel.chainCollection = chain_col\n"
             f"    settings = bpy.context.scene.mhw_suite_settings\n"
-            f"    settings.import_preset_enum = '怪猎荒野.json'\n"
+            f"    settings.import_preset_enum = {_WILDS_X_PRESET_FILE!r}\n"
             f"    if arm_obj: bpy.context.view_layer.objects.active = arm_obj\n"
             f"    bpy.ops.object.mode_set(mode='OBJECT')\n"
             f"    bpy.ops.object.select_all(action='DESELECT')\n"
@@ -1534,14 +1626,25 @@ class PhysicsChains(PhaseTool):
         """
         Apply physics parameters from physics_presets.json to each chain settings object.
 
-        For SEPARATE mode: assigns each cs_name a params dict based on the matching
-        inferred_type. Chain heads are ordered alphabetically (consistent with operator
-        iteration order). If lengths mismatch, the last resolved params dict is reused.
+        For SEPARATE mode: each CS gets the params of the chain head bone of the
+        chain group(s) that use it. RE Chain Editor parents a CHAINGROUP object to
+        its CHAINSETTINGS object; the group's first RE_CHAIN_NODE child is the
+        chain head, bound to its bone by the "BoneName" constraint (subtarget).
+        That bone is looked up in inferred_types / resolved_params.
+        A CS is left UNTOUCHED and reported in the returned list as
+        "<cs>.(untouched: <reason>)" when no chain group uses it, when any of its
+        chain heads has no inferred_type, or when its chain heads disagree on the
+        inferred_type. There is deliberately no positional fallback:
+        inferred_types holds every classified head while the chains built are a
+        subset in another order, so pairing by list position handed chains other
+        types' presets (GG skirt strands got body_jiggle / accessory_ribbon).
 
-        For SHARED mode: applies the params for the first (or only) inferred_type to
-        the single shared chain settings object.
+        For SHARED mode: applies the params for the alphabetically-first inferred
+        bone to every cs_name. (run() does not take this path: SHARED goes through
+        _consolidate_chain_settings + _apply_params_by_type.)
 
-        Returns a list of skipped param keys (those that could not be set).
+        Returns a list of skipped entries: "<cs>.<param>" for params that could
+        not be set, "<cs>.(not found)", and the SEPARATE "<cs>.(untouched: ...)".
 
         NOTE: Parameter assignment uses Blender's RNA PropertyGroup interface (setattr).
         RE Chain Editor stores chain settings fields as PropertyGroup attributes.
@@ -1551,30 +1654,11 @@ class PhysicsChains(PhaseTool):
         if not cs_names:
             return []
 
-        # Build ordered list of params — one per cs_name
-        ordered_bone_names = sorted(inferred_types.keys())
-        params_list: list[dict] = []
-
-        if settings_mode == "SHARED":
-            first_bone = ordered_bone_names[0] if ordered_bone_names else ""
-            shared_params = resolved_params.get(first_bone, {})
-            params_list = [shared_params] * len(cs_names)
-        else:
-            for i in range(len(cs_names)):
-                bone_name = ordered_bone_names[i] if i < len(ordered_bone_names) else ordered_bone_names[-1]
-                params_list.append(resolved_params.get(bone_name, {}))
-
-        # Add default collider path to each params dict if not already present
         collider_default = (
             _load_presets()
             .get("_usage_guide", {})
             .get("colliderFilterInfoPath_default", _DEFAULT_COLLIDER_PATH)
         )
-        for p in params_list:
-            p.setdefault("colliderFilterInfoPath", collider_default)
-
-        # Serialize params_list for injection into Blender code
-        params_json = json.dumps(params_list, ensure_ascii=False)
         cs_names_json = json.dumps(cs_names, ensure_ascii=False)
 
         # Enum fields stored as strings in RE Chain Editor PropertyGroup
@@ -1582,38 +1666,118 @@ class PhysicsChains(PhaseTool):
             "windDelayType", "springCalcType", "chainType",
             "muzzleDirection", "motionForceCalcType",
         })
-        code = (
-            f"import bpy, json\n"
-            f"cs_names = json.loads({cs_names_json!r})\n"
-            f"params_list = json.loads({params_json!r})\n"
-            f"ENUM_FIELDS = {enum_fields_repr}\n"
-            f"skipped = []\n"
-            f"for i, cs_name in enumerate(cs_names):\n"
-            f"    cs_obj = bpy.data.objects.get(cs_name)\n"
-            f"    if cs_obj is None:\n"
-            f"        skipped.append(cs_name + '.(not found)')\n"
-            f"        continue\n"
-            f"    pg = cs_obj.re_chain_chainsettings\n"
-            f"    p = params_list[i] if i < len(params_list) else params_list[-1]\n"
-            f"    for key, val in p.items():\n"
-            f"        if isinstance(val, list):\n"
-            f"            val = tuple(val)\n"
-            f"        if key in ENUM_FIELDS:\n"
-            f"            val = str(int(val))\n"
-            f"        try:\n"
-            f"            setattr(pg, key, val)\n"
-            f"        except (AttributeError, TypeError):\n"
-            f"            skipped.append(cs_name + '.' + key)\n"
-            f"print({BLENDER_SENTINEL!r})\n"
-            f"print('APPLIED:' + json.dumps(skipped))\n"
-        )
+
+        if settings_mode == "SHARED":
+            ordered_bone_names = sorted(inferred_types.keys())
+            first_bone = ordered_bone_names[0] if ordered_bone_names else ""
+            shared_params = resolved_params.get(first_bone, {})
+            params_list = [shared_params] * len(cs_names)
+
+            # Add default collider path to each params dict if not already present
+            for p in params_list:
+                p.setdefault("colliderFilterInfoPath", collider_default)
+
+            params_json = json.dumps(params_list, ensure_ascii=False)
+            code = (
+                f"import bpy, json\n"
+                f"cs_names = json.loads({cs_names_json!r})\n"
+                f"params_list = json.loads({params_json!r})\n"
+                f"ENUM_FIELDS = {enum_fields_repr}\n"
+                f"skipped = []\n"
+                f"for i, cs_name in enumerate(cs_names):\n"
+                f"    cs_obj = bpy.data.objects.get(cs_name)\n"
+                f"    if cs_obj is None:\n"
+                f"        skipped.append(cs_name + '.(not found)')\n"
+                f"        continue\n"
+                f"    pg = cs_obj.re_chain_chainsettings\n"
+                f"    p = params_list[i] if i < len(params_list) else params_list[-1]\n"
+                f"    for key, val in p.items():\n"
+                f"        if isinstance(val, list):\n"
+                f"            val = tuple(val)\n"
+                f"        if key in ENUM_FIELDS:\n"
+                f"            val = str(int(val))\n"
+                f"        try:\n"
+                f"            setattr(pg, key, val)\n"
+                f"        except (AttributeError, TypeError):\n"
+                f"            skipped.append(cs_name + '.' + key)\n"
+                f"print({BLENDER_SENTINEL!r})\n"
+                f"print('APPLIED:' + json.dumps(skipped))\n"
+            )
+        else:
+            # SEPARATE: key everything by chain head bone; Blender resolves CS → heads.
+            bone_params: dict[str, dict] = {}
+            for bone_name in inferred_types:
+                if bone_name in resolved_params:
+                    p = dict(resolved_params[bone_name])
+                    p.setdefault("colliderFilterInfoPath", collider_default)
+                    bone_params[bone_name] = p
+            bone_types = {b: t for b, t in inferred_types.items() if b in bone_params}
+            bone_types_json = json.dumps(bone_types, ensure_ascii=False)
+            bone_params_json = json.dumps(bone_params, ensure_ascii=False)
+            code = (
+                f"import bpy, json\n"
+                f"cs_names = json.loads({cs_names_json!r})\n"
+                f"bone_types = json.loads({bone_types_json!r})\n"
+                f"bone_params = json.loads({bone_params_json!r})\n"
+                f"ENUM_FIELDS = {enum_fields_repr}\n"
+                f"skipped = []\n"
+                # A chain group's head = its first RE_CHAIN_NODE child's BoneName bone
+                # (the same read RE Chain Editor's exporter and the toolkit use).
+                f"def chain_head(grp):\n"
+                f"    node = next((c for c in grp.children\n"
+                f"                 if c.get('TYPE') == 'RE_CHAIN_NODE'), None)\n"
+                f"    con = node.constraints.get('BoneName') if node is not None else None\n"
+                f"    return con.subtarget if con is not None else ''\n"
+                f"for cs_name in cs_names:\n"
+                f"    cs_obj = bpy.data.objects.get(cs_name)\n"
+                f"    if cs_obj is None:\n"
+                f"        skipped.append(cs_name + '.(not found)')\n"
+                f"        continue\n"
+                # A CHAINGROUP uses the CHAINSETTINGS object it is parented to.
+                f"    heads = [chain_head(g) for g in cs_obj.children\n"
+                f"             if g.get('TYPE') == 'RE_CHAIN_CHAINGROUP']\n"
+                f"    if not heads:\n"
+                f"        skipped.append(cs_name + '.(untouched: no chain group uses it)')\n"
+                f"        continue\n"
+                f"    untyped = [h or '<no BoneName>' for h in heads if h not in bone_params]\n"
+                f"    if untyped:\n"
+                f"        skipped.append(cs_name + '.(untouched: no inferred_type for chain head '\n"
+                f"                       + ', '.join(untyped) + ')')\n"
+                f"        continue\n"
+                f"    types = sorted(set(bone_types[h] for h in heads))\n"
+                f"    if len(types) > 1:\n"
+                f"        skipped.append(cs_name + '.(untouched: chain heads ' + ', '.join(heads)\n"
+                f"                       + ' have conflicting inferred_types '\n"
+                f"                       + ', '.join(types) + ')')\n"
+                f"        continue\n"
+                f"    pg = cs_obj.re_chain_chainsettings\n"
+                f"    for key, val in bone_params[heads[0]].items():\n"
+                f"        if isinstance(val, list):\n"
+                f"            val = tuple(val)\n"
+                f"        if key in ENUM_FIELDS:\n"
+                f"            val = str(int(val))\n"
+                f"        try:\n"
+                f"            setattr(pg, key, val)\n"
+                f"        except (AttributeError, TypeError):\n"
+                f"            skipped.append(cs_name + '.' + key)\n"
+                f"print({BLENDER_SENTINEL!r})\n"
+                f"print('APPLIED:' + json.dumps(skipped))\n"
+            )
+
         lines = client.execute_and_extract(code, timeout=120)
+        skipped: list[str] = []
         if lines and lines[0].startswith("APPLIED:"):
             try:
-                return json.loads(lines[0][len("APPLIED:"):])
+                skipped = json.loads(lines[0][len("APPLIED:"):])
             except json.JSONDecodeError:
-                pass
-        return []
+                skipped = []
+        untouched = [s for s in skipped if ".(untouched:" in s]
+        if untouched:
+            logger.warning(
+                "physics_chains %s: %d chain settings object(s) left untouched: %s",
+                settings_mode, len(untouched), untouched,
+            )
+        return skipped
 
     def _consolidate_chain_settings(
         self,
@@ -1626,15 +1790,22 @@ class PhysicsChains(PhaseTool):
         Split the single shared CHAINSETTINGS into one CS per unique inferred_type.
 
         Strategy (SHARED + create per type):
-          1. Discover CHAINGROUP → bone_name by reading the first child CHAINNODE's
-             parent_bone property (re_chain_chainnode or re_chain_chainnodesettings PG).
-          2. Group CHAINGROUPs by inferred_type.
-          3. The alphabetically-first type gets the existing canonical CS.
-          4. Each additional type: call re_chain.create_chain_settings() to create a new
-             CS object inside the chain collection; detect by diffing object names.
-          5. Reassign CHAINGROUPs of non-first types to their new CS.
+          1. Discover CHAINGROUP → chain head bone: the group's first RE_CHAIN_NODE child's
+             "BoneName" constraint subtarget (RE Chain Editor's own read, as SEPARATE mode).
+          2. Group CHAINGROUPs by their head's inferred_type; a head without one is untyped.
+          3. No untyped group: the alphabetically-first type keeps the canonical CS.
+             Untyped groups: they keep the canonical CS, which is left untouched (mapped to
+             the empty type "", so _apply_params_by_type sets nothing on it and reports it),
+             and every type gets a new CS — no chain is given another chain's preset.
+          4. Each type without a CS: re_chain.create_chain_settings() makes one in the chain
+             collection; detected by diffing object names.
+          5. Move each group onto its type's CS by object PARENT (the exporter writes the
+             parent CS's id as the group's settingID), keeping its world placement.
 
         Returns (None, cs_to_type) — always non-fatal. Fallback: canonical CS → first type.
+        (Until 2026-10-19 step 1 looked for 'RE_CHAIN_CHAINNODE' children with a parent_bone
+        property, neither of which exists: it mapped 0 groups and every chain got the
+        alphabetically-first type.)
         """
         unique_types = sorted(set(inferred_types.values()))
         _fallback: dict[str, str] = {canonical_cs_name: unique_types[0] if unique_types else ""}
@@ -1646,72 +1817,70 @@ class PhysicsChains(PhaseTool):
             f"col_name = {col_name!r}\n"
             f"inferred_types = {inferred_json}\n"
             f"col = bpy.data.collections.get(col_name)\n"
-            # Step 1: discover CHAINGROUP→bone via first child CHAINNODE's parent_bone
-            f"cg_to_bone = {{}}\n"
+            f"def chain_head(grp):\n"
+            f"    node = next((c for c in grp.children if c.get('TYPE') == 'RE_CHAIN_NODE'), None)\n"
+            f"    con = node.constraints.get('BoneName') if node is not None else None\n"
+            f"    return con.subtarget if con is not None else ''\n"
+            # Step 1+2: CHAINGROUPs of this collection by their head's inferred_type
             f"col_obj_names = {{o.name for o in col.all_objects}} if col else None\n"
+            f"type_to_cgs = {{}}\n"
+            f"unmapped = []\n"
             f"for obj in bpy.data.objects:\n"
             f"    if obj.get('TYPE') != 'RE_CHAIN_CHAINGROUP': continue\n"
             f"    if col_obj_names is not None and obj.name not in col_obj_names: continue\n"
-            f"    for child in obj.children:\n"
-            f"        if child.get('TYPE') != 'RE_CHAIN_CHAINNODE': continue\n"
-            f"        for pname in ('re_chain_chainnode', 're_chain_chainnodesettings'):\n"
-            f"            pg = getattr(child, pname, None)\n"
-            f"            if pg is not None and hasattr(pg, 'parent_bone') and pg.parent_bone:\n"
-            f"                cg_to_bone[obj.name] = pg.parent_bone\n"
-            f"                break\n"
-            f"        if obj.name in cg_to_bone: break\n"
-            # Step 2: group CHAINGROUPs by inferred_type
-            f"type_to_cgs = {{}}\n"
-            f"unmapped = []\n"
-            f"for cg_name, bone_name in cg_to_bone.items():\n"
-            f"    itype = inferred_types.get(bone_name)\n"
-            f"    if itype: type_to_cgs.setdefault(itype, []).append(cg_name)\n"
-            f"    else: unmapped.append(cg_name + ':' + bone_name)\n"
+            f"    head = chain_head(obj)\n"
+            f"    itype = inferred_types.get(head)\n"
+            f"    if itype: type_to_cgs.setdefault(itype, []).append(obj.name)\n"
+            f"    else: unmapped.append(obj.name + ':' + (head or '<no BoneName>'))\n"
             f"unique_types = sorted(type_to_cgs.keys())\n"
-            # Step 3: assign canonical CS to first type; create new CS for remaining types
+            # Step 3: who keeps the canonical CS
             f"cs_to_type = {{}}\n"
             f"type_to_cs = {{}}\n"
             f"errors = []\n"
-            f"if unique_types:\n"
+            f"if unmapped:\n"
+            f"    cs_to_type[canonical_cs_name] = ''\n"
+            f"    need_new = unique_types\n"
+            f"elif unique_types:\n"
             f"    type_to_cs[unique_types[0]] = canonical_cs_name\n"
             f"    cs_to_type[canonical_cs_name] = unique_types[0]\n"
-            f"    if len(unique_types) > 1:\n"
-            f"        _cs0 = bpy.data.objects.get(canonical_cs_name)\n"
-            f"        if _cs0: bpy.context.view_layer.objects.active = _cs0\n"
-            f"        bpy.ops.object.mode_set(mode='OBJECT')\n"
-            f"        if col: bpy.context.scene.re_chain_toolpanel.chainCollection = col\n"
-            f"        for itype in unique_types[1:]:\n"
-            f"            before = {{o.name for o in bpy.data.objects if o.get('TYPE') == 'RE_CHAIN_CHAINSETTINGS'}}\n"
-            f"            try:\n"
-            f"                bpy.ops.re_chain.create_chain_settings()\n"
-            f"            except Exception as _e:\n"
-            f"                errors.append('create_cs:' + itype + ':' + str(_e)[:80])\n"
-            f"                type_to_cs[itype] = canonical_cs_name\n"
-            f"                continue\n"
-            f"            new_cands = [o.name for o in bpy.data.objects\n"
-            f"                         if o.get('TYPE') == 'RE_CHAIN_CHAINSETTINGS' and o.name not in before]\n"
-            f"            if new_cands:\n"
-            f"                type_to_cs[itype] = new_cands[0]\n"
-            f"                cs_to_type[new_cands[0]] = itype\n"
-            f"            else:\n"
-            f"                errors.append('create_cs:' + itype + ':no_new_object')\n"
-            f"                type_to_cs[itype] = canonical_cs_name\n"
-            # Step 4: reassign CHAINGROUPs of non-first types to their new CS
-            f"    for itype, cg_names in type_to_cgs.items():\n"
-            f"        target_cs_name = type_to_cs.get(itype, canonical_cs_name)\n"
-            f"        if target_cs_name == canonical_cs_name: continue\n"
-            f"        target_cs_obj = bpy.data.objects.get(target_cs_name)\n"
-            f"        if not target_cs_obj: continue\n"
-            f"        for cg_name in cg_names:\n"
-            f"            cg = bpy.data.objects.get(cg_name)\n"
-            f"            if not cg: continue\n"
-            f"            for pname in ('re_chain_chaingroup', 're_chain_chaingroupsettings'):\n"
-            f"                pg = getattr(cg, pname, None)\n"
-            f"                if pg is not None and hasattr(pg, 'chainSetting'):\n"
-            f"                    try: pg.chainSetting = target_cs_obj\n"
-            f"                    except Exception as _e: errors.append('reassign:' + cg_name + ':' + str(_e)[:60])\n"
-            f"                    break\n"
+            f"    need_new = unique_types[1:]\n"
             f"else:\n"
+            f"    need_new = []\n"
+            # Step 4: a new CS for every other type
+            f"if need_new:\n"
+            f"    _cs0 = bpy.data.objects.get(canonical_cs_name)\n"
+            f"    if _cs0: bpy.context.view_layer.objects.active = _cs0\n"
+            f"    bpy.ops.object.mode_set(mode='OBJECT')\n"
+            f"    if col: bpy.context.scene.re_chain_toolpanel.chainCollection = col\n"
+            f"for itype in need_new:\n"
+            f"    before = {{o.name for o in bpy.data.objects if o.get('TYPE') == 'RE_CHAIN_CHAINSETTINGS'}}\n"
+            f"    try:\n"
+            f"        bpy.ops.re_chain.create_chain_settings()\n"
+            f"    except Exception as _e:\n"
+            f"        errors.append('create_cs:' + itype + ':' + str(_e)[:80])\n"
+            f"        continue\n"
+            f"    new_cands = [o.name for o in bpy.data.objects\n"
+            f"                 if o.get('TYPE') == 'RE_CHAIN_CHAINSETTINGS' and o.name not in before]\n"
+            f"    if new_cands:\n"
+            f"        type_to_cs[itype] = new_cands[0]\n"
+            f"        cs_to_type[new_cands[0]] = itype\n"
+            f"    else:\n"
+            f"        errors.append('create_cs:' + itype + ':no_new_object')\n"
+            # Step 5: parent each typed group to its type's CS, world placement kept. A type
+            # whose CS could not be made stays on the canonical CS, which is then not given
+            # any one type (its groups are reported in errors).
+            f"for itype, cg_names in type_to_cgs.items():\n"
+            f"    target = bpy.data.objects.get(type_to_cs.get(itype, ''))\n"
+            f"    if target is None:\n"
+            f"        cs_to_type[canonical_cs_name] = ''\n"
+            f"        continue\n"
+            f"    for cg_name in cg_names:\n"
+            f"        cg = bpy.data.objects.get(cg_name)\n"
+            f"        if cg is None or cg.parent is target: continue\n"
+            f"        mw = cg.matrix_world.copy()\n"
+            f"        cg.parent = target\n"
+            f"        cg.matrix_world = mw\n"
+            f"if not type_to_cgs and not unmapped:\n"
             f"    first_type = sorted(set(inferred_types.values()))[0] if inferred_types else ''\n"
             f"    cs_to_type[canonical_cs_name] = first_type\n"
             f"print({BLENDER_SENTINEL!r})\n"
@@ -1790,6 +1959,17 @@ class PhysicsChains(PhaseTool):
             f"        continue\n"
             f"    pg = cs_obj.re_chain_chainsettings\n"
             f"    p = params_list[i] if i < len(params_list) else params_list[-1]\n"
+            # A CS consolidation mapped to no type holds the untyped chains: left untouched.
+            f"    if not p:\n"
+            f"        heads = []\n"
+            f"        for g in cs_obj.children:\n"
+            f"            if g.get('TYPE') != 'RE_CHAIN_CHAINGROUP': continue\n"
+            f"            node = next((c for c in g.children if c.get('TYPE') == 'RE_CHAIN_NODE'), None)\n"
+            f"            con = node.constraints.get('BoneName') if node is not None else None\n"
+            f"            heads.append(con.subtarget if con is not None and con.subtarget else '<no BoneName>')\n"
+            f"        skipped.append(cs_name + '.(untouched: no inferred_type for chain head '\n"
+            f"                       + ', '.join(sorted(heads)) + ')')\n"
+            f"        continue\n"
             f"    for key, val in p.items():\n"
             f"        if isinstance(val, list):\n"
             f"            val = tuple(val)\n"

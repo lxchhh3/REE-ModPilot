@@ -1,7 +1,10 @@
 # ModPilot — Hierarchical Agent Loop Refactor (Router + PhaseLoop)
 
-> **Status:** PRs 1-6 landed locally (no push yet). All decision-locked goals achieved.
-> Last updated: 2026-05-24.
+> **Status:** 🟢 shipped. PRs 1-6 landed and pushed as commit `283bec8` (issue #20, 2026-05-24).
+> All decision-locked goals achieved. Historical record — kept for the rationale and the
+> deferred-work list at the bottom, which is still accurate.
+>
+> *Moved here from the repo root (`Context_Improvement_Plan.md`) on 2026-08-06.*
 
 ## Context
 

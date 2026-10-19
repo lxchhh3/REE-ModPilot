@@ -23,6 +23,110 @@ _OP_FBX_IMPORT = "bpy.ops.import_scene.fbx"
 _MHWILDS_COLLECTION = "MHWilds_Female.mesh"
 _MHWILDS_ARMATURE = "MHWilds_Female Armature"
 
+# Blender-side fixes to the source rig, run right after the import (or on the rig the user
+# imported). The pipeline carries deformation by vertex groups only, so:
+#   1. a mesh hung RIGIDLY on a bone (parent_type BONE, as RigForge's "attach to bone" leaves a
+#      headset on the Neck) becomes a mesh skinned 1.0 to that bone, world placement unchanged.
+#      Left alone it has no groups: the join put it on Hip and in game it did not follow her neck
+#      (GG gg5, Blender-MHWilds lesson #44).
+#   2. MochiFitter's '<bone>_MFBase' helper bones (a copy of <bone> on its head, the outfit's
+#      weights on it) fold into <bone>: weights added onto it, children re-hung on it, the helper
+#      and its own '_end' leaf removed. No MH Wilds bone maps to a helper, so the clothes on it did
+#      not follow her breasts or hips (Marette, mfbase_to_base.py). A helper whose base bone is
+#      missing, or that is not on the base bone's head (> 0.01 mm), is left as it is and reported.
+SOURCE_FIX_SRC = '''
+import mathutils
+
+_MFBASE = "_MFBase"
+
+
+def _deformed_by(obj, arm):
+    return obj.type == "MESH" and (obj.parent is arm or any(
+        m.type == "ARMATURE" and m.object is arm for m in obj.modifiers))
+
+
+def _rigid_to_skinned(arm):
+    done = {}
+    # a mesh that also carries an Armature modifier on this rig is deformed twice already: not ours
+    for obj in [o for o in bpy.data.objects if o.type == "MESH" and o.parent is arm
+                and o.parent_type == "BONE" and o.parent_bone in arm.data.bones
+                and not any(m.type == "ARMATURE" and m.object is arm for m in o.modifiers)]:
+        bone = obj.parent_bone
+        mw = obj.matrix_world.copy()
+        obj.data.transform(mw, shape_keys=True)
+        if mw.determinant() < 0:
+            obj.data.flip_normals()
+        obj.parent_type = "OBJECT"
+        obj.parent_bone = ""
+        obj.matrix_parent_inverse = arm.matrix_world.inverted()
+        obj.matrix_basis = mathutils.Matrix.Identity(4)
+        g = obj.vertex_groups.get(bone) or obj.vertex_groups.new(name=bone)
+        g.add(list(range(len(obj.data.vertices))), 1.0, "REPLACE")
+        mod = obj.modifiers.new("Armature", "ARMATURE")
+        mod.object = arm
+        mod.use_vertex_groups = True
+        obj.data.update()
+        done[obj.name] = bone
+    return done
+
+
+def _fold_mfbase(arm):
+    bones = arm.data.bones
+    folded, skipped = {}, {}
+    for b in bones:
+        if not b.name.endswith(_MFBASE):
+            continue
+        base = b.name[:-len(_MFBASE)]
+        if base not in bones:
+            skipped[b.name] = "no bone " + base
+        elif (b.head_local - bones[base].head_local).length > 1e-5:
+            skipped[b.name] = "%.3f mm off %s" % ((b.head_local - bones[base].head_local).length * 1000, base)
+        else:
+            folded[b.name] = base
+    if not folded:
+        return folded, skipped
+    for obj in [o for o in bpy.data.objects if _deformed_by(o, arm)]:
+        for helper, base in folded.items():
+            src = obj.vertex_groups.get(helper)
+            if src is None:
+                continue
+            dst = obj.vertex_groups.get(base) or obj.vertex_groups.new(name=base)
+            for v in obj.data.vertices:
+                w = next((e.weight for e in v.groups if e.group == src.index), 0.0)
+                if w > 0:
+                    have = next((e.weight for e in v.groups if e.group == dst.index), 0.0)
+                    dst.add([v.index], have + w, "REPLACE")
+            obj.vertex_groups.remove(src)
+    was_active = bpy.context.view_layer.objects.active
+    hidden = arm.hide_get()
+    arm.hide_set(False)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode="EDIT")
+    eb = arm.data.edit_bones
+    for helper, base in folded.items():
+        doomed = [eb[helper]]
+        for child in list(eb[helper].children):
+            if child.name.startswith(helper) and not child.children:
+                doomed.append(child)  # the helper's own '_end' leaf
+            else:
+                child.use_connect = False
+                child.parent = eb[base]
+        for e in doomed:
+            eb.remove(e)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    arm.hide_set(hidden)
+    bpy.context.view_layer.objects.active = was_active
+    return folded, skipped
+
+
+def _fix_source_rig(arm):
+    if bpy.context.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    rigid = _rigid_to_skinned(arm)
+    folded, skipped = _fold_mfbase(arm)
+    return {"rigid_to_skinned": rigid, "mfbase_folded": folded, "mfbase_skipped": skipped}
+'''
+
 
 class SetupImportSource(PhaseTool):
     """
@@ -105,6 +209,7 @@ class SetupImportSource(PhaseTool):
         # the agent from a half-set-up scene doesn't duplicate the armature.
         code = (
             "import bpy, os, json\n"
+            f"{SOURCE_FIX_SRC}\n"
             f"_SEN = {BLENDER_SENTINEL!r}\n"
             f"_MHWILDS = {_MHWILDS_COLLECTION!r}\n"
             f"_PATH = {file_path!r}\n"
@@ -115,9 +220,10 @@ class SetupImportSource(PhaseTool):
             "src_arms = [o for o in bpy.context.scene.objects "
             "if o.type == 'ARMATURE' and o.name not in excluded]\n"
             "if src_arms:\n"
+            "    fixes = _fix_source_rig(src_arms[0])\n"
             "    print(_SEN)\n"
             "    print(json.dumps({'status': 'already_imported', "
-            "'source_armature': src_arms[0].name}))\n"
+            "'source_armature': src_arms[0].name, 'source_fixes': fixes}, ensure_ascii=False))\n"
             "elif not os.path.isfile(_PATH):\n"
             "    print(_SEN)\n"
             "    print(json.dumps({'status': 'file_not_found', 'file_path': _PATH}))\n"
@@ -132,13 +238,15 @@ class SetupImportSource(PhaseTool):
             "    new_arms = [n for n in added "
             "if bpy.data.objects[n].type == 'ARMATURE']\n"
             "    src = new_arms[0] if new_arms else None\n"
+            "    fixes = _fix_source_rig(bpy.data.objects[src]) if ok and src else None\n"
             "    print(_SEN)\n"
             "    print(json.dumps({\n"
             "        'status': 'imported' if ok else 'cancelled',\n"
             "        'operator_result': str(ret),\n"
             "        'imported_objects': added,\n"
             "        'source_armature': src,\n"
-            "    }))\n"
+            "        'source_fixes': fixes,\n"
+            "    }, ensure_ascii=False))\n"
         )
 
         try:
@@ -201,6 +309,8 @@ class SetupImportSource(PhaseTool):
         }
         if status == "imported":
             diff["imported_objects"] = result.get("imported_objects", [])
+        if result.get("source_fixes") is not None:
+            diff["source_fixes"] = result["source_fixes"]
         return PhaseResult.ok(diff)
 
 

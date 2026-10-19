@@ -203,7 +203,7 @@ def _render_session_config_block(cfg: dict) -> str:
     else:
         x_preset_hint = (
             "model_type is 'Other' — ask the user ONCE for the correct x_preset "
-            "(valid: MMD / VRChat / 终末地) before running Phase 1."
+            "(valid: MMD / VRChat / arknights) before running Phase 1."
         )
 
     author = cfg.get("author", "")

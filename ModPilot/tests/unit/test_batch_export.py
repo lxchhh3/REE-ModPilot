@@ -367,6 +367,16 @@ class TestRunExport:
         assert not result.success
         assert result.error.category == "operator_failed"
 
+    def test_export_call_waits_two_minutes(self):
+        # RE-Mesh-Editor-BlendShape writes shape keys: the Maya body export took ~80 s, past
+        # the client's 30 s default, and was reported as a lost connection (kevin, 2026-10-13).
+        client = MagicMock()
+        client.execute_and_extract.side_effect = _full_flow_side_effect()
+        self.tool.run(client, _make_cache(), _valid_params())
+        export_call = client.execute_and_extract.call_args_list[-1]
+        assert "bpy.ops.mhws.batch_export()" in export_call.args[0]
+        assert export_call.kwargs.get("timeout") == 120
+
 
 # ── state_diff contents ───────────────────────────────────────────────────────
 

@@ -275,11 +275,12 @@ def test_shipped_list_matches_toolkit_x_presets() -> None:
     """Pins the count so that adding presets to the constant is intentional
     rather than accidental — keeps the fallback in sync with reality.
 
-    13 not 14: 街霸6.json lives in the import/ folder but declares
+    Modding-Toolkit 2.8.5 (a31fb82) renamed presets to ASCII file stems.
+    16 not 17: sf6.json lives in the import/ folder but declares
     type="Y_PRESET", so enumerate_x_presets correctly skips it. The shipped
     list mirrors that filter."""
-    assert len(SHIPPED_X_PRESETS) == 13
+    assert len(SHIPPED_X_PRESETS) == 16
     assert "MMD" in SHIPPED_X_PRESETS
     assert "VRChat" in SHIPPED_X_PRESETS
-    assert "怪猎荒野" in SHIPPED_X_PRESETS
-    assert "街霸6" not in SHIPPED_X_PRESETS
+    assert "mhws" in SHIPPED_X_PRESETS
+    assert "sf6" not in SHIPPED_X_PRESETS

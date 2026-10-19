@@ -14,6 +14,7 @@ Run with: uv run pytest -m unit tests/unit/test_physics_bones.py -v
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -903,3 +904,265 @@ class TestVerifyChainMarks:
         code = client.execute_and_extract.call_args[0][0]
         assert "_End" in code
         assert "stack" in code  # iterative BFS, not recursion
+
+
+# ── bone selection works on Blender 4 and Blender 5 ──────────────────────────
+#
+# Blender 5 moved pose-mode selection from Bone.select to PoseBone.select (Bone has no
+# `select` any more), found by tools-5.2 L3: `'Bone' object has no attribute 'select'`.
+# These run the generated code against a fake bpy shaped like each version.
+
+
+class _Bone4:
+    def __init__(self):
+        self.select = False
+
+
+class _PoseBone4:  # Blender 4: no PoseBone.select; selection is on the Bone
+    __slots__ = ("name", "bone")
+
+    def __init__(self, name):
+        self.name, self.bone = name, _Bone4()
+
+
+class _Bone5:  # Blender 5: Bone.select is gone
+    __slots__ = ()
+
+
+class _PoseBone5:
+    def __init__(self, name):
+        self.name, self.bone, self.select = name, _Bone5(), False
+
+
+class _AnyOp:
+    """bpy.ops / bpy.context stand-in: any attribute, any call -> {'FINISHED'}."""
+
+    def __getattr__(self, name):
+        return _AnyOp()
+
+    def __call__(self, *args, **kwargs):
+        return {"FINISHED"}
+
+
+def _run_with_fake_bpy(code, pose_bones, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    arm = SimpleNamespace(pose=SimpleNamespace(bones={b.name: b for b in pose_bones}),
+                          select_set=lambda v: None)
+    fake = SimpleNamespace(data=SimpleNamespace(objects={"MHWs": arm}), context=_AnyOp(), ops=_AnyOp())
+    monkeypatch.setitem(sys.modules, "bpy", fake)
+    exec(code, {})
+
+
+def _selected(pose_bones):
+    return sorted(b.name for b in pose_bones
+                  if (b.select if hasattr(b, "select") else b.bone.select))
+
+
+class TestBoneSelectionAcrossBlenderVersions:
+    tool = PhysicsChains()
+
+    @pytest.mark.parametrize("pose_bone", [_PoseBone4, _PoseBone5], ids=["blender4", "blender5"])
+    def test_merge_selects_the_named_bones(self, pose_bone, monkeypatch):
+        client = _make_client(["{'FINISHED'}"])
+        assert self.tool._merge_into_parents(client, "MHWs", ["Ribbon_root"]) is None
+        bones = [pose_bone("Ribbon_root"), pose_bone("Head")]
+        _run_with_fake_bpy(client.execute_and_extract.call_args[0][0], bones, monkeypatch)
+        assert _selected(bones) == ["Ribbon_root"]
+
+    @pytest.mark.parametrize("pose_bone", [_PoseBone4, _PoseBone5], ids=["blender4", "blender5"])
+    def test_clear_selects_the_named_bones(self, pose_bone, monkeypatch):
+        client = _make_client(["{'FINISHED'}"])
+        assert self.tool._clear_specific_bone_roles(client, "MHWs", ["Cage", "Cage_L"]) is None
+        bones = [pose_bone("Cage"), pose_bone("Cage_L"), pose_bone("Head")]
+        _run_with_fake_bpy(client.execute_and_extract.call_args[0][0], bones, monkeypatch)
+        assert _selected(bones) == ["Cage", "Cage_L"]
+
+
+# ── SEPARATE mode: each chain settings object gets ITS OWN chain head's params ──
+#
+# Bug (GG outfit run, 2026-10-15): SEPARATE mode gave cs_names[i] the params of
+# sorted(inferred_types)[i], purely by list position. inferred_types holds every
+# classified head (hair, breasts, Hips, ribbons, skirt strands...), the chains built
+# are a subset in another order, so 7 of the 10 GG skirt strands (all typed
+# cloth_skirt_waist) shipped with body_jiggle or accessory_ribbon params.
+#
+# These run the generated code against a fake bpy shaped like RE Chain Editor's
+# scene: a CHAINGROUP is parented to its CHAINSETTINGS object, its first child
+# RE_CHAIN_NODE is the chain head, bound to the bone by the "BoneName" constraint.
+
+# The inferred_types the GG run passed (Known_Good_mod_test/scripts/gg/physics_chains.json).
+_GG_INFERRED_TYPES = {
+    "Ahoge.001": "hair_short", "Ear_L.001": "hair_short", "Ear_R.001": "hair_short",
+    "F_Hair": "hair_front_bangs", "F_Hair_L.001": "hair_front_bangs",
+    "F_Hair_R.001": "hair_front_bangs",
+    "GG_Ribbon_L.001": "accessory_ribbon", "GG_Ribbon_R.001": "accessory_ribbon",
+    "GG_Skirt.Root_B.001": "cloth_skirt_waist", "GG_Skirt.Root_B_L.001": "cloth_skirt_waist",
+    "GG_Skirt.Root_B_R.001": "cloth_skirt_waist", "GG_Skirt.Root_F_L.001": "cloth_skirt_waist",
+    "GG_Skirt.Root_F_R.001": "cloth_skirt_waist", "GG_Skirt.Root_L.001": "cloth_skirt_waist",
+    "GG_Skirt.Root_L.006": "cloth_skirt_waist", "GG_Skirt.Root_M.001": "cloth_skirt_waist",
+    "GG_Skirt.Root_R.001": "cloth_skirt_waist", "GG_Skirt.Root_R.006": "cloth_skirt_waist",
+    "Hips_L": "body_jiggle", "Hips_R": "body_jiggle",
+    "Ribbon_Head_L_L": "accessory_ribbon", "Ribbon_Head_L_L.001": "accessory_ribbon",
+    "Ribbon_Head_L_R": "accessory_ribbon", "Ribbon_Head_L_R.001": "accessory_ribbon",
+    "Ribbon_Head_R_L": "accessory_ribbon", "Ribbon_Head_R_L.001": "accessory_ribbon",
+    "Ribbon_Head_R_R": "accessory_ribbon", "Ribbon_Head_R_R.001": "accessory_ribbon",
+    "S2_Hair_L.001": "hair_short", "S2_Hair_R.001": "hair_short",
+    "S_Hair_L.001": "hair_medium", "S_Hair_R.001": "hair_medium",
+    "Tail": "fur_tail", "Twin tail_L.001": "hair_twintail", "Twin tail_R.001": "hair_twintail",
+    "breast_L": "body_jiggle", "breast_R": "body_jiggle",
+}
+
+_GG_SKIRT_HEADS = sorted(b for b, t in _GG_INFERRED_TYPES.items() if t == "cloth_skirt_waist")
+
+
+class _ChainObj:
+    """bpy Object stand-in: custom props via get(), children, constraints, chain settings PG."""
+
+    def __init__(self, name, obj_type, children=(), bone=None):
+        self.name = name
+        self._props = {"TYPE": obj_type}
+        self.children = list(children)
+        self.constraints = {} if bone is None else {"BoneName": SimpleNamespace(subtarget=bone)}
+        self.re_chain_chainsettings = SimpleNamespace()  # records every setattr
+        self.parent = None
+        for child in self.children:
+            child.parent = self
+
+    def get(self, key, default=None):
+        return self._props.get(key, default)
+
+
+def _chain_scene(cs_chains):
+    """{cs_name: [[head_bone, next_bone, ...] per chain group]} -> bpy.data.objects dict."""
+    objects = {}
+    for cs_name, chains in cs_chains.items():
+        groups = []
+        for gi, bones in enumerate(chains):
+            node = None
+            for bone in reversed(bones):
+                node = _ChainObj(bone, "RE_CHAIN_NODE", [node] if node else [], bone=bone)
+            groups.append(_ChainObj(f"CHAIN_GROUP_{cs_name}_{gi}", "RE_CHAIN_CHAINGROUP", [node]))
+        objects[cs_name] = _ChainObj(cs_name, "RE_CHAIN_CHAINSETTINGS", groups)
+        objects.update({g.name: g for g in groups})
+    return objects
+
+
+def _apply_separate_on_fake_scene(objects, cs_names, inferred_types, monkeypatch, capsys):
+    """Run SEPARATE-mode _apply_params_to_chain_settings' generated code on a fake scene.
+
+    Returns the skipped list the generated code printed after APPLIED:.
+    """
+    import sys
+
+    resolved = {bone: get_physics_params(itype) for bone, itype in inferred_types.items()}
+    client = _make_client(["APPLIED:[]"])
+    PhysicsChains()._apply_params_to_chain_settings(
+        client, cs_names, inferred_types, resolved, "SEPARATE"
+    )
+    code = client.execute_and_extract.call_args[0][0]
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace(data=SimpleNamespace(objects=objects)))
+    capsys.readouterr()
+    exec(code, {})
+    applied = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("APPLIED:")]
+    assert len(applied) == 1
+    return json.loads(applied[0][len("APPLIED:"):])
+
+
+@pytest.mark.unit
+class TestSeparateModeParamsByChainHead:
+    def test_gg_skirt_strands_all_get_cloth_skirt_waist(self, monkeypatch, capsys):
+        """The GG case: chains are a subset of inferred_types, in pose-bone order."""
+        heads = (
+            ["Twin tail_L.001", "Twin tail_R.001", "GG_Ribbon_L.001", "GG_Ribbon_R.001"]
+            + ["GG_Skirt.Root_M.001", "GG_Skirt.Root_F_L.001", "GG_Skirt.Root_F_R.001",
+               "GG_Skirt.Root_L.001", "GG_Skirt.Root_R.001", "GG_Skirt.Root_B_L.001",
+               "GG_Skirt.Root_B.001", "GG_Skirt.Root_B_R.001", "GG_Skirt.Root_L.006",
+               "GG_Skirt.Root_R.006"]
+            + ["Tail", "breast_L", "breast_R"]
+        )
+        cs_names = [f"CHAIN_SETTINGS_{i:02d}" for i in range(len(heads))]
+        objects = _chain_scene(
+            {cs: [[h, h + "_next"]] for cs, h in zip(cs_names, heads, strict=True)}
+        )
+
+        skipped = _apply_separate_on_fake_scene(
+            objects, cs_names, _GG_INFERRED_TYPES, monkeypatch, capsys
+        )
+
+        assert skipped == []
+        for cs, head in zip(cs_names, heads, strict=True):
+            want = get_physics_params(_GG_INFERRED_TYPES[head])
+            pg = objects[cs].re_chain_chainsettings
+            assert (pg.damping, pg.springForce) == (want["damping"], want["springForce"]), (
+                f"{cs} (head {head}) got the wrong preset"
+            )
+        skirt_cs = [cs for cs, h in zip(cs_names, heads, strict=True) if h in _GG_SKIRT_HEADS]
+        assert len(skirt_cs) == 10
+        assert {objects[cs].re_chain_chainsettings.damping for cs in skirt_cs} == {0.12}
+        assert {objects[cs].re_chain_chainsettings.springForce for cs in skirt_cs} == {0.002}
+
+    def test_cs_whose_chain_head_has_no_inferred_type_is_untouched_and_reported(
+        self, monkeypatch, capsys
+    ):
+        """No positional fallback: an untyped chain head leaves its CS alone, named in skipped."""
+        inferred = {"Tail": "fur_tail"}
+        objects = _chain_scene({
+            "CHAIN_SETTINGS_00": [["Tail", "Tail.001"]],
+            "CHAIN_SETTINGS_01": [["Mystery_Strand", "Mystery_Strand.001"]],
+        })
+
+        skipped = _apply_separate_on_fake_scene(
+            objects, ["CHAIN_SETTINGS_00", "CHAIN_SETTINGS_01"], inferred, monkeypatch, capsys
+        )
+
+        assert objects["CHAIN_SETTINGS_00"].re_chain_chainsettings.damping == (
+            get_physics_params("fur_tail")["damping"]
+        )
+        assert vars(objects["CHAIN_SETTINGS_01"].re_chain_chainsettings) == {}
+        assert len(skipped) == 1
+        assert skipped[0].startswith("CHAIN_SETTINGS_01.")
+        assert "Mystery_Strand" in skipped[0]
+        assert "untouched" in skipped[0]
+
+    def test_cs_whose_chain_heads_disagree_on_type_is_untouched_and_reported(
+        self, monkeypatch, capsys
+    ):
+        """One CS used by chains of two different types: no single right preset, so none."""
+        inferred = {"breast_L": "body_jiggle", "Tail": "fur_tail"}
+        objects = _chain_scene({
+            "CHAIN_SETTINGS_00": [["breast_L", "breast_L_End"], ["Tail", "Tail.001"]],
+        })
+
+        skipped = _apply_separate_on_fake_scene(
+            objects, ["CHAIN_SETTINGS_00"], inferred, monkeypatch, capsys
+        )
+
+        assert vars(objects["CHAIN_SETTINGS_00"].re_chain_chainsettings) == {}
+        assert len(skipped) == 1
+        assert skipped[0].startswith("CHAIN_SETTINGS_00.")
+        assert "body_jiggle" in skipped[0] and "fur_tail" in skipped[0]
+
+    def test_cs_shared_by_chains_of_one_type_gets_that_type(self, monkeypatch, capsys):
+        """A CS reused by several chains (re-run / recovery over an existing collection)
+        still gets its chains' type when they all agree — not the alphabetically first head's."""
+        inferred = {
+            "Ahoge.001": "hair_short",
+            "GG_Skirt.Root_B.001": "cloth_skirt_waist",
+            "GG_Skirt.Root_M.001": "cloth_skirt_waist",
+        }
+        objects = _chain_scene({
+            "CHAIN_SETTINGS_00": [
+                ["GG_Skirt.Root_M.001", "GG_Skirt.Root_M.002"],
+                ["GG_Skirt.Root_B.001", "GG_Skirt.Root_B.002"],
+            ],
+        })
+
+        skipped = _apply_separate_on_fake_scene(
+            objects, ["CHAIN_SETTINGS_00"], inferred, monkeypatch, capsys
+        )
+
+        assert skipped == []
+        pg = objects["CHAIN_SETTINGS_00"].re_chain_chainsettings
+        assert (pg.damping, pg.springForce) == (0.12, 0.002)

@@ -11,15 +11,15 @@ Operator: modder.universal_snap (骨架对齐 [X+Y, 双骨架])
     - Both import_preset_enum (X) and target_preset_enum (Y) loaded
 
 Required params:
-  x_preset         : str  — source model preset ("MMD" | "VRChat" | "终末地")
+  x_preset         : str  — source model preset ("MMD" | "VRChat" | "arknights")
   source_armature  : str  — Blender object name of the source ARMATURE
   target_armature  : str  — Blender object name of the game ARMATURE (Y skeleton)
-  y_preset         : str  — target game preset (default: "怪猎荒野")
+  y_preset         : str  — target game preset (default: "mhws")
 
 Classification decision (agent loop, E17):
   The X preset selection IS the key classification — which source type is the model?
-  Agent loop asks LLM, gets "MMD" / "VRChat" / "终末地", then calls this phase.
-  Y preset is fixed to "怪猎荒野" for MVP.
+  Agent loop asks LLM, gets "MMD" / "VRChat" / "arknights", then calls this phase.
+  Y preset is fixed to "mhws" for MVP.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ class SkeletonAlign(PhaseTool):
                 "properties": {
                     "x_preset": {
                         "type": "string",
-                        "enum": ["MMD", "VRChat", "终末地"],
+                        "enum": ["MMD", "VRChat", "arknights"],
                         "description": "Source model type preset.",
                     },
                     "source_armature": {
@@ -83,8 +83,8 @@ class SkeletonAlign(PhaseTool):
                     },
                     "y_preset": {
                         "type": "string",
-                        "enum": ["怪猎荒野"],
-                        "description": "Target game preset. Always 怪猎荒野 for MHWs.",
+                        "enum": ["mhws"],
+                        "description": "Target game preset. Always mhws for MHWs.",
                     },
                 },
                 "required": ["x_preset", "source_armature", "target_armature"],
@@ -105,7 +105,7 @@ class SkeletonAlign(PhaseTool):
                     category="precondition",
                     operator="",
                     message=f"Unknown X preset {x_preset!r}. Valid: {sorted(X_PRESETS)}",
-                    suggestion="Choose from MMD, VRChat, or 终末地.",
+                    suggestion="Choose from MMD, VRChat, or arknights.",
                 )
             )
 

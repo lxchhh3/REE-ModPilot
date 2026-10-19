@@ -66,7 +66,7 @@ export function Phase23Stage({ state, onErrorChoice }: StageProps) {
     phase3Status === 'active' || phase2Status === 'done' ? 'phase_3' : 'phase_2';
 
   const xPreset = (skeletonRun?.input?.x_preset as string | undefined) ?? null;
-  const yPreset = (skeletonRun?.input?.y_preset as string | undefined) ?? '怪猎荒野';
+  const yPreset = (skeletonRun?.input?.y_preset as string | undefined) ?? 'mhws';
   const sourceArm = (skeletonRun?.input?.source_armature as string | undefined) ?? null;
   const targetArm = (skeletonRun?.input?.target_armature as string | undefined) ?? null;
 

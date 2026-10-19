@@ -1,7 +1,7 @@
 """Unit tests for physics_colliders.py (Phase 4C).
 
 Focus:
-  - clsp_body_bits.json catalog integrity (20 bits, monotonic, sum == 0xFFFFF)
+  - clsp_body_bits.json catalog integrity (21 bits: the 20 body regions + hip_wide 0x800000)
   - bit helpers (mask_for_keys / keys_for_mask round-trip)
   - ColliderCreate: tool metadata, scan-only success path, missing-op fallback
   - ColliderApply: tool metadata, param validation, flag assignment, dict shape
@@ -55,9 +55,10 @@ class TestClspBodyBitsJson:
         data = json.loads(_BITS_PATH.read_text(encoding="utf-8"))
         assert isinstance(data, dict)
 
-    def test_has_exactly_20_bits(self):
+    def test_has_exactly_21_bits(self):
+        # one per collider of full_body.clsp.3 (20 body regions + the wide hip sphere)
         data = json.loads(_BITS_PATH.read_text(encoding="utf-8"))
-        assert len(data["bits"]) == 20
+        assert len(data["bits"]) == 21
 
     def test_each_entry_has_bit_and_label(self):
         data = json.loads(_BITS_PATH.read_text(encoding="utf-8"))
@@ -69,16 +70,16 @@ class TestClspBodyBitsJson:
     def test_bits_are_distinct_powers_of_two(self):
         data = json.loads(_BITS_PATH.read_text(encoding="utf-8"))
         bits = [e["bit"] for e in data["bits"].values()]
-        assert len(set(bits)) == 20, "bit values must be distinct"
+        assert len(set(bits)) == 21, "bit values must be distinct"
         for b in bits:
             assert b > 0 and (b & (b - 1)) == 0, f"bit {b:#x} is not a power of two"
 
-    def test_full_mask_is_20_low_bits(self):
+    def test_full_mask_is_20_low_bits_plus_the_wide_hip(self):
         data = json.loads(_BITS_PATH.read_text(encoding="utf-8"))
         full = 0
         for entry in data["bits"].values():
             full |= entry["bit"]
-        assert full == 0xFFFFF, f"OR of all bits should be 0xFFFFF, got {full:#x}"
+        assert full == 0xFFFFF | 0x800000, f"OR of all bits should be 0x8FFFFF, got {full:#x}"
 
     def test_known_bit_positions(self):
         """Spot-check the canonical bit values from the issue spec."""
@@ -96,9 +97,9 @@ class TestClspBodyBitsJson:
 
 @pytest.mark.unit
 class TestBitHelpers:
-    def test_list_body_bit_keys_returns_20(self):
+    def test_list_body_bit_keys_returns_21(self):
         keys = list_body_bit_keys()
-        assert len(keys) == 20
+        assert len(keys) == 21
 
     def test_mask_for_keys_single(self):
         assert mask_for_keys(["spine_0"]) == 0x00002
@@ -120,7 +121,7 @@ class TestBitHelpers:
         assert keys_for_mask(0) == []
 
     def test_keys_for_mask_full(self):
-        assert sorted(keys_for_mask(0xFFFFF)) == sorted(list_body_bit_keys())
+        assert sorted(keys_for_mask(0xFFFFF | 0x800000)) == sorted(list_body_bit_keys())
 
 
 # ── ColliderCreate ───────────────────────────────────────────────────────────
@@ -176,20 +177,99 @@ class TestColliderCreate:
         assert info["clsp_collection"] == "Chain Clsps - MHWilds_Female.clsp"
 
     def test_missing_operator_fails_with_precondition(self):
-        """If create_full_body_clsp op missing, return precondition error pointing
-        at the WildsChain plugin install."""
-        client = _client(["MISSING_OP:re_chain.create_full_body_clsp"])
+        """If RE Chain Editor's re_clsp.importfile is missing, return a precondition
+        error pointing at the RE Chain Editor install."""
+        client = _client(["MISSING_OP:re_clsp.importfile"])
         result = self.tool.run(client, _cache(), {})
         assert not result.success
         assert result.error.category == "precondition"
-        assert "create_full_body_clsp" in result.error.message
-        assert "Wilds Chain Editor" in result.error.suggestion or "chain editor" in result.error.suggestion.lower()
+        assert "re_clsp.importfile" in result.error.message
+        assert "RE Chain Editor" in result.error.suggestion
 
     def test_operator_cancelled_fails(self):
         client = _client(["CANCELLED:{'CANCELLED'}"])
         result = self.tool.run(client, _cache(), {})
         assert not result.success
         assert result.error.category == "operator_failed"
+
+    # Which armature the colliders bind to. Found by the tools-5.2 L3 coverage replay
+    # (2026-10-12): after Phase 4B the scene holds the avatar's armature AND the MH Wilds one,
+    # with no armature active, so re_clsp.importfile (bound to the active object) cancelled
+    # with "More than one armature was found in the scene", in Blender 4.3 and 5.2 alike.
+
+    def test_schema_takes_an_optional_target_armature(self):
+        schema = ColliderCreate.tool_schema()["input_schema"]
+        assert "target_armature" in schema["properties"]
+        assert "target_armature" not in schema.get("required", [])
+
+    def test_binds_to_the_mhwilds_armature_not_the_active_object(self, monkeypatch):
+        imports, out = _run_create_with_fake_bpy(self.tool, {}, monkeypatch)
+        assert [kw["targetArmature"] for kw in imports] == ["MHWilds_Female Armature.data"]
+
+    def test_an_explicit_target_armature_wins(self, monkeypatch):
+        imports, out = _run_create_with_fake_bpy(self.tool, {"target_armature": "Armature"}, monkeypatch)
+        assert [kw["targetArmature"] for kw in imports] == ["Armature.data"]
+
+    def test_a_missing_target_armature_is_not_imported_onto_something_else(self, monkeypatch):
+        imports, out = _run_create_with_fake_bpy(self.tool, {"target_armature": "Nope"}, monkeypatch)
+        assert imports == []
+        assert "NO_ARMATURE:Nope" in out
+
+    def test_a_missing_target_armature_fails_with_precondition(self):
+        client = _client(["NO_ARMATURE:MHWilds_Female Armature"])
+        result = self.tool.run(client, _cache(), {})
+        assert not result.success
+        assert result.error.category == "precondition"
+        assert "MHWilds_Female Armature" in result.error.message
+
+
+class _FakeObj:
+    def __init__(self, name, type_):
+        self.name, self.type, self.constraints = name, type_, []
+        self.data = type("Data", (), {"name": f"{name}.data"})() if type_ == "ARMATURE" else None
+
+    def get(self, key, default=None):
+        return default
+
+
+class _FakeObjects(dict):
+    """bpy.data.objects: .get(name) by name, iteration over the objects."""
+
+    def __iter__(self):
+        return iter(list(self.values()))
+
+
+def _run_create_with_fake_bpy(tool, params, monkeypatch):
+    """Run ColliderCreate's Blender-side code against a scene like a real one after Phase 4B
+    (the avatar's armature, the MH Wilds armature, a mesh active); return (importfile kwargs, stdout)."""
+    import contextlib
+    import io
+    import sys
+    from types import SimpleNamespace
+
+    client = _client(["CANCELLED:{'CANCELLED'}"])
+    tool.run(client, _cache(), params)
+    code = client.execute_and_extract.call_args[0][0]
+
+    imports = []
+
+    def importfile(**kwargs):
+        imports.append(kwargs)
+        return {"CANCELLED"}
+
+    re_clsp = SimpleNamespace(importfile=importfile)
+    objs = [_FakeObj("Armature", "ARMATURE"), _FakeObj("MHWilds_Female Armature", "ARMATURE"),
+            _FakeObj("Body", "MESH")]
+    fake = SimpleNamespace(
+        data=SimpleNamespace(objects=_FakeObjects({o.name: o for o in objs})),
+        context=SimpleNamespace(active_object=objs[2]),
+        ops=SimpleNamespace(re_clsp=re_clsp),
+    )
+    monkeypatch.setitem(sys.modules, "bpy", fake)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(code, {})
+    return imports, out.getvalue()
 
 
 # ── ColliderApply ────────────────────────────────────────────────────────────

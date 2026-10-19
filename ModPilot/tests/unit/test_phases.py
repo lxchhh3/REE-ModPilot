@@ -282,20 +282,21 @@ class TestPoseCorrection:
         assert client.execute_and_extract.call_count == 2
         # Second call should be pose_convert, not scale_align
         second_code = client.execute_and_extract.call_args_list[1].args[0]
-        assert "tpose_direction" in second_code
+        assert "modder.mmd_a_to_tpose" in second_code
 
     # ── step 3: pose convert ───────────────────────────────────────────────
 
-    def test_mmd_calls_tpose_direction(self):
-        """MMD x_preset: third call must invoke modder.tpose_direction."""
+    def test_mmd_calls_mmd_a_to_tpose(self):
+        """MMD x_preset: third call must invoke modder.mmd_a_to_tpose (Toolkit 2.8.5
+        renamed modder.tpose_direction; the new op is fixed to MMD.json)."""
         client = make_client()
         cache = make_cache(client)
         result = self._phase().run(client, cache, self._base_params("MMD"))
         assert result.success
         assert client.execute_and_extract.call_count == 3
         third_code = client.execute_and_extract.call_args_list[2].args[0]
-        assert "tpose_direction" in third_code
-        assert "MMD" in third_code
+        assert "bpy.ops.modder.mmd_a_to_tpose()" in third_code
+        assert "tpose_direction" not in third_code
 
     def test_vrchat_skips_pose_convert(self):
         """VRChat x_preset: only 2 calls (reset + scale_align); no pose op."""
@@ -306,23 +307,25 @@ class TestPoseCorrection:
         assert client.execute_and_extract.call_count == 2
 
     def test_endfield_calls_apply_transform_forward(self):
-        """终末地 x_preset: third call must invoke modder.apply_transform_forward."""
+        """arknights (Endfield) x_preset: third call must invoke modder.apply_transform_forward."""
         client = make_client()
         cache = make_cache(client)
-        result = self._phase().run(client, cache, self._base_params("终末地"))
+        result = self._phase().run(client, cache, self._base_params("arknights"))
         assert result.success
         assert client.execute_and_extract.call_count == 3
         third_code = client.execute_and_extract.call_args_list[2].args[0]
         assert "apply_transform_forward" in third_code
-        assert "终末地" in third_code  # both preset and transform_name
+        assert "pose_import_preset_enum = 'arknights.json'" in third_code
 
     def test_endfield_sets_pose_preset_enum(self):
-        """终末地 conversion must set pose_preset_enum to '终末地' (the transform file)."""
+        """Endfield conversion must select the Endfield A-to-T pose record. Toolkit ships
+        no plain '终末地.json' pose file (not in 2.4.7 either); the record is
+        '终末地 A转Tpose.json'."""
         client = make_client()
         cache = make_cache(client)
-        self._phase().run(client, cache, self._base_params("终末地"))
+        self._phase().run(client, cache, self._base_params("arknights"))
         third_code = client.execute_and_extract.call_args_list[2].args[0]
-        assert "pose_preset_enum" in third_code
+        assert "pose_preset_enum = '终末地 A转Tpose.json'" in third_code
 
     # ── error propagation ──────────────────────────────────────────────────
 
@@ -381,12 +384,12 @@ class TestSkeletonAlign:
         code = client.execute_and_extract.call_args.args[0]
         assert "universal_snap" in code
         assert "MMD" in code
-        assert "怪猎荒野" in code  # default Y preset
+        assert "'mhws.json'" in code  # default Y preset
         assert "SourceArm" in code
         assert "GameArm" in code
 
     def test_default_y_preset_is_mhws(self):
-        """Y preset defaults to 怪猎荒野 when not specified."""
+        """Y preset defaults to mhws (Toolkit 2.8.5 stem for MHWilds) when not specified."""
         client = make_client([f"{{'FINISHED'}}"])
         cache = make_cache(client)
         result = self._phase().run(client, cache, {
@@ -396,7 +399,7 @@ class TestSkeletonAlign:
         })
         assert result.success
         code = client.execute_and_extract.call_args.args[0]
-        assert "怪猎荒野" in code
+        assert "target_preset_enum = 'mhws.json'" in code
 
     def test_target_active_in_code(self):
         """Target armature must be set as active_object (operator precondition)."""
@@ -572,10 +575,10 @@ class TestVertexGroups:
         """X and Y presets must appear in the direct_convert call."""
         client = self._make_full_client()
         cache = make_cache(client)
-        self._phase().run(client, cache, self._base_params("终末地"))
+        self._phase().run(client, cache, self._base_params("arknights"))
         second_code = client.execute_and_extract.call_args_list[1].args[0]
-        assert "终末地" in second_code
-        assert "怪猎荒野" in second_code
+        assert "'arknights.json'" in second_code
+        assert "'mhws.json'" in second_code
 
     def test_convert_precondition_stops_reparent(self):
         """PRECONDITION from step 2 must stop the pipeline before step 3."""

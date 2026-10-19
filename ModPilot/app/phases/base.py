@@ -13,9 +13,9 @@ Valid preset identifiers:
   X_PRESETS  — source model type presets (import_preset_enum)
   Y_PRESETS  — target game presets      (target_preset_enum)
 
-Chinese preset names (e.g. "终末地", "怪猎荒野") are transmitted as UTF-8
-JSON — Python's json module handles encoding transparently.  The Blender-side
-exec receives the decoded Unicode string unchanged.
+Preset identifiers are the Toolkit's preset file stems (Modding-Toolkit 2.8.5
+renamed them to ASCII: "mhws" = MHWilds, "arknights" = Endfield). The Blender-side
+enums take "<stem>.json", so a display name such as "怪猎荒野" is not a valid value.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from app.blender.state import SceneCache, SceneState
 #: startup, and so Waves 3-4 (issues #5 / #6) can add user-supplemented
 #: or user-created presets without a server restart.
 #:
-#: Default contents are the 13 X-preset names shipped with Modding-Toolkit
+#: Default contents are the 16 X-preset stems shipped with Modding-Toolkit 2.8.5
 #: so unit tests that don't go through the lifespan still see a populated
 #: set, and so server boot is non-fatal when Blender isn't reachable.
 #:
@@ -45,18 +45,21 @@ from app.blender.state import SceneCache, SceneState
 #: existing module-level references stay valid.
 X_PRESETS: set[str] = {
     "MMD",
+    "RE6",
     "VRChat",
-    "Valve社",
-    "怪猎世界",
-    "怪猎崛起",
-    "怪猎荒野",
-    "生化危机4",
-    "生化危机9",
-    "碧蓝幻想",
-    "终末地",
-    "绝地潜兵2",
-    "赛马娘",
-    "鬼泣5",
+    "arknights",
+    "dmc5",
+    "dmc5_alt",
+    "gbf",
+    "hd2",
+    "mhwi_world",
+    "mhwr",
+    "mhws",
+    "re4",
+    "re9",
+    "uma",
+    "valve",
+    "vrm",
 }
 
 
@@ -76,10 +79,10 @@ def add_x_preset(name: str) -> None:
 #: Target-game Y presets available in assets/presets/bone/ (MVP: MHWs only).
 #: Kept frozen for now — issues #4/#5/#6 are X-preset-only; Y is single-target
 #: until post-MVP per design.md A4.
-Y_PRESETS: frozenset[str] = frozenset({"怪猎荒野"})
+Y_PRESETS: frozenset[str] = frozenset({"mhws"})
 
 #: Default Y preset for MHWs — the only MVP target game
-DEFAULT_Y_PRESET: str = "怪猎荒野"
+DEFAULT_Y_PRESET: str = "mhws"
 
 
 # ── result types ───────────────────────────────────────────────────────────

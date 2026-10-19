@@ -5,6 +5,9 @@ Three-step pipeline applied after skeleton alignment (Phase 2):
 
   Step 1 — Mesh prep & merge  (_prep_and_merge)
     - Ensure every mesh has at least one material slot (create placeholder if missing).
+    - Make the parts join-safe (JOIN_PREP_SRC): each part's shape-key mix into its basis
+      (keys kept), UV layers named by position after the active part's, colour layers
+      a part lacks added white.
     - Join all source meshes into a single object (bpy.ops.object.join).
     - MMD only: remove functional vertex groups mmd_edge_scale / mmd_vertex_order.
     - Clean zero-weight entries (vertex_group_clean).
@@ -24,16 +27,17 @@ Three-step pipeline applied after skeleton alignment (Phase 2):
 Source armature is left untouched; it is still needed for physics bone work (Phase 4).
 
 Required params:
-  x_preset        : str        — "MMD" | "VRChat" | "终末地"
+  x_preset        : str        — "MMD" | "VRChat" | "arknights"
   mesh_objects    : list[str]  — source MESH object names to process
   target_armature : str        — MHWilds ARMATURE object name (re-parent destination)
 
 Optional params:
-  y_preset        : str        — default "怪猎荒野"
+  y_preset        : str        — default "mhws"
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.blender.client import BLENDER_SENTINEL, BlenderClient, BlenderError
@@ -50,6 +54,92 @@ from app.phases.base import (
 
 _OP_JOIN = "object.join"
 _OP_CONVERT = "modder.direct_convert"
+
+# Blender-side preparation run on every source mesh right before the join (ModPilot lesson #48,
+# Blender-MHWilds lessons #11 / #42). The join keeps ONE value per shape key (the active object's)
+# and merges UV / colour layers by NAME, while the exporter ships each vertex's BASIS position
+# (keys are muted before export) and writes UV layers by INDEX. Unprepared, the BHS shoes lost
+# High heeled = 1 (soles 4.3 cm into the floor) and the GG garments' 'UVマップ' went to a third
+# layer the exporter never writes (every UV at (0, 0), colour zero-filled: the clothes did not draw).
+#   1. each part's current shape-key mix becomes its basis; every key block moves by the same
+#      offset, so each key still adds what it added, and every value goes to 0
+#   2. each part's UV layers take the active part's names by position (missing ones are added,
+#      zero-filled), so each part exports the UVs it would have exported alone
+#   3. a colour layer some part lacks is added to it white (MultiBlend cloth reads vertex colour,
+#      and black cut the clothes away in game, Blender-MHWilds lesson #73)
+JOIN_PREP_SRC = '''
+import json
+
+
+def _bake_mix_keep_keys(obj):
+    keys = obj.data.shape_keys
+    if keys is None or not keys.use_relative:
+        return None
+    live = {kb.name: round(kb.value, 6) for kb in keys.key_blocks[1:] if kb.value != 0.0 and not kb.mute}
+    if not live:
+        return None
+    n = len(obj.data.vertices)
+    ref_co, mix_co = [0.0] * (3 * n), [0.0] * (3 * n)
+    keys.reference_key.data.foreach_get("co", ref_co)
+    tmp = obj.shape_key_add(name="__modpilot_mix", from_mix=True)
+    tmp.data.foreach_get("co", mix_co)
+    obj.shape_key_remove(tmp)
+    shift = [m - r for m, r in zip(mix_co, ref_co)]
+    co = [0.0] * (3 * n)
+    for kb in keys.key_blocks:
+        kb.data.foreach_get("co", co)
+        kb.data.foreach_set("co", [c + s for c, s in zip(co, shift)])
+    for kb in keys.key_blocks[1:]:
+        kb.value = 0.0
+    obj.data.vertices.foreach_set("co", mix_co)
+    obj.data.update()
+    return live
+
+
+def _match_uv_layers(obj, names):
+    uv = obj.data.uv_layers
+    old = [u.name for u in uv]
+    k = min(len(old), len(names))
+    renamed = {old[i]: names[i] for i in range(k) if old[i] != names[i]}
+    if renamed:
+        for i in range(k):  # through temporary names: a part's 'UVMap' may have to become 'UV 맵' first
+            uv[i].name = "__modpilot_uv%d" % i
+        for i in range(k):
+            uv[i].name = names[i]
+    added = []
+    for name in names[k:]:
+        layer = uv.new(name=name)
+        layer.data.foreach_set("uv", [0.0] * (2 * len(layer.data)))
+        added.append(name)
+    return renamed, added
+
+
+def _prepare_for_join(objs):
+    report = {"baked_keys": {}, "uv_renamed": {}, "uv_added": {}, "colour_added": {}}
+    for obj in objs:
+        live = _bake_mix_keep_keys(obj)
+        if live:
+            report["baked_keys"][obj.name] = live
+    names = [u.name for u in objs[0].data.uv_layers]
+    for obj in objs[1:]:
+        renamed, added = _match_uv_layers(obj, names)
+        if renamed:
+            report["uv_renamed"][obj.name] = renamed
+        if added:
+            report["uv_added"][obj.name] = added
+    colours = {}
+    for obj in objs:
+        for ca in obj.data.color_attributes:
+            colours.setdefault(ca.name, (ca.domain, ca.data_type))
+    for obj in objs:
+        for name, (domain, data_type) in colours.items():
+            if name in obj.data.color_attributes:
+                continue
+            ca = obj.data.color_attributes.new(name=name, type=data_type, domain=domain)
+            ca.data.foreach_set("color", [1.0] * (4 * len(ca.data)))
+            report["colour_added"].setdefault(obj.name, []).append(name)
+    return report
+'''
 
 
 class VertexGroups(PhaseTool):
@@ -77,7 +167,7 @@ class VertexGroups(PhaseTool):
                 "properties": {
                     "x_preset": {
                         "type": "string",
-                        "enum": ["MMD", "VRChat", "终末地"],
+                        "enum": ["MMD", "VRChat", "arknights"],
                         "description": "Source model type preset.",
                     },
                     "mesh_objects": {
@@ -91,8 +181,8 @@ class VertexGroups(PhaseTool):
                     },
                     "y_preset": {
                         "type": "string",
-                        "enum": ["怪猎荒野"],
-                        "description": "Target game preset. Always 怪猎荒野 for MHWs.",
+                        "enum": ["mhws"],
+                        "description": "Target game preset. Always mhws for MHWs.",
                     },
                 },
                 "required": ["x_preset", "mesh_objects", "target_armature"],
@@ -113,7 +203,7 @@ class VertexGroups(PhaseTool):
                     category="precondition",
                     operator="",
                     message=f"Unknown X preset {x_preset!r}. Valid: {sorted(X_PRESETS)}",
-                    suggestion="Choose from MMD, VRChat, or 终末地.",
+                    suggestion="Choose from MMD, VRChat, or arknights.",
                 )
             )
 
@@ -155,7 +245,7 @@ class VertexGroups(PhaseTool):
         # ── pipeline ───────────────────────────────────────────────────────
         try:
             # Step 1 — prep & merge; returns merged object name on success
-            err, merged_name = self._prep_and_merge(client, mesh_objects, x_preset)
+            err, merged_name, join_prep = self._prep_and_merge(client, mesh_objects, x_preset)
             if err is not None:
                 return PhaseResult.fail(err)
 
@@ -195,7 +285,10 @@ class VertexGroups(PhaseTool):
 
         # ── exit cache update ──────────────────────────────────────────────
         state_after = cache.refresh()
-        return PhaseResult.ok(state_before.diff(state_after))
+        diff = state_before.diff(state_after)
+        if join_prep is not None:
+            diff["join_prep"] = join_prep
+        return PhaseResult.ok(diff)
 
     # ── private helpers ────────────────────────────────────────────────────
 
@@ -204,15 +297,18 @@ class VertexGroups(PhaseTool):
         client: BlenderClient,
         mesh_objects: list[str],
         x_preset: str,
-    ) -> tuple[PhaseError | None, str]:
+    ) -> tuple[PhaseError | None, str, dict | None]:
         """
         1. Validate all objects exist and are MESH type.
         2. Add a placeholder material to any mesh that has no material slots.
-        3. Join all meshes (active = first in list; result retains its name).
-        4. MMD: remove mmd_edge_scale and mmd_vertex_order vertex groups.
-        5. Clean zero-weight entries, then normalise all vertex weights.
+        3. Make the parts join-safe (JOIN_PREP_SRC): shape-key mix into the basis,
+           UV layers named by position, missing colour layers added white.
+        4. Join all meshes (active = first in list; result retains its name).
+        5. MMD: remove mmd_edge_scale and mmd_vertex_order vertex groups.
+        6. Clean zero-weight entries, then normalise all vertex weights.
 
-        Returns (None, merged_name) on success, (PhaseError, "") on failure.
+        Returns (None, merged_name, join-prep report or None) on success,
+        (PhaseError, "", None) on failure.
         """
         lookup_lines = "\n".join(
             f"obj = bpy.data.objects.get({name!r})\n"
@@ -227,6 +323,7 @@ class VertexGroups(PhaseTool):
 
         code = (
             f"import bpy\n"
+            f"{JOIN_PREP_SRC}\n"
             f"mesh_objs = []\n"
             f"missing = []\n"
             f"not_mesh = []\n"
@@ -243,8 +340,10 @@ class VertexGroups(PhaseTool):
             f"        if len(obj.material_slots) == 0:\n"
             f"            mat = bpy.data.materials.new(name=obj.name + '_mat')\n"
             f"            obj.data.materials.append(mat)\n"
-            # Merge: first object is active; joined result keeps its name
             f"    bpy.ops.object.mode_set(mode='OBJECT')\n"
+            # Shape-key mix, UV and colour layers made join-safe (JOIN_PREP_SRC)
+            f"    _join_prep = _prepare_for_join(mesh_objs)\n"
+            # Merge: first object is active; joined result keeps its name
             f"    bpy.ops.object.select_all(action='DESELECT')\n"
             f"    for obj in mesh_objs:\n"
             f"        obj.select_set(True)\n"
@@ -265,6 +364,7 @@ class VertexGroups(PhaseTool):
             f"    bpy.ops.object.vertex_group_normalize_all(lock_active=False)\n"
             f"    print({BLENDER_SENTINEL!r})\n"
             f"    print(f'PREP_OK:{{merged.name}}')\n"
+            f"    print('JOIN_PREP:' + json.dumps(_join_prep, ensure_ascii=False))\n"
         )
         lines = client.execute_and_extract(code)
         if not lines:
@@ -275,6 +375,7 @@ class VertexGroups(PhaseTool):
                     message="Mesh prep returned no output from Blender.",
                 ),
                 "",
+                None,
             )
         if lines[0].startswith("PRECONDITION:"):
             detail = lines[0][len("PRECONDITION:"):]
@@ -289,10 +390,18 @@ class VertexGroups(PhaseTool):
                     ),
                 ),
                 "",
+                None,
             )
         if lines[0].startswith("PREP_OK:"):
             merged_name = lines[0][len("PREP_OK:"):]
-            return None, merged_name
+            join_prep = None
+            for line in lines[1:]:
+                if line.startswith("JOIN_PREP:"):
+                    try:
+                        join_prep = json.loads(line[len("JOIN_PREP:"):])
+                    except json.JSONDecodeError:
+                        join_prep = {"unparsed": line[len("JOIN_PREP:"):]}
+            return None, merged_name, join_prep
         return (
             PhaseError(
                 category="unexpected",
@@ -300,6 +409,7 @@ class VertexGroups(PhaseTool):
                 message=f"Unexpected output from mesh prep: {lines[0]!r}",
             ),
             "",
+            None,
         )
 
     def _convert_vertex_groups(

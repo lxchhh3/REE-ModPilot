@@ -12,7 +12,10 @@ Part IDs (games/mhws/batch_export.py:17-24):
 
 Binding key format:
   scene["mhws_{armor_id}_{part_id}_{filetype}"] = collection_name
-  Filetypes: "mesh", "mdf2", "chain2"  (clsp → leave unbound = empty model)
+  Filetypes: "mesh", "mdf2", "chain2", and "clsp" — the colliders Phase 4C imported (the
+  collection RE Chain Editor tags ~TYPE = RE_CLSP_COLLECTION), or an explicit
+  `clsp_collection`. Unbound, the clsp is exported blank: until 2026-10-19 it always was, so
+  every chain's collision mask pointed at no collider in game (ModPilot lesson #47).
 
 Armor variant encodes both hunter gender and armor gender (main_panel.py:123-138):
   "ff" = female hunter + female armor  (default for character mods)
@@ -45,8 +48,10 @@ PART_NAMES: dict[str, str] = {
 }
 VALID_VARIANTS: frozenset[str] = frozenset({"mm", "mf", "fm", "ff"})
 
-#: Filetypes bound per part; clsp is intentionally excluded (empty model)
+#: Filetypes bound per part from the three collection params; the clsp is bound separately
+#: (found by its collection tag, or `clsp_collection`)
 EXPORT_FILETYPES: tuple[str, ...] = ("mesh", "mdf2", "chain2")
+CLSP_COLLECTION_TAG: str = "RE_CLSP_COLLECTION"
 
 DEFAULT_ARMOR_SCHEME: str = "mhws_armor_sets.json"
 
@@ -97,7 +102,9 @@ class BatchExport(PhaseTool):
                         "type": "string",
                         "description": (
                             "Armor equipment ID as it appears in the armor scheme "
-                            "(e.g. 'pl001'). Case-sensitive."
+                            "(e.g. 'pl024'). Case-sensitive. Avoid pl001: none of the "
+                            "verified BoneSystem mods sit on it, and a ModPilot pl001 "
+                            "build lost its custom bones in game."
                         ),
                     },
                     "armor_variant": {
@@ -155,6 +162,14 @@ class BatchExport(PhaseTool):
                             f"Armor scheme JSON filename. Defaults to '{DEFAULT_ARMOR_SCHEME}'."
                         ),
                     },
+                    "clsp_collection": {
+                        "type": "string",
+                        "description": (
+                            "Collider (clsp) collection to export with the target parts. "
+                            "Omit it to export the one collider_create imported (found "
+                            "automatically); pass \"\" to export a blank clsp."
+                        ),
+                    },
                 },
                 "required": [
                     "armor_id",
@@ -183,7 +198,7 @@ class BatchExport(PhaseTool):
                 PhaseError(
                     category="precondition",
                     operator="",
-                    message="'armor_id' is required (e.g. 'pl001').",
+                    message="'armor_id' is required (e.g. 'pl024').",
                 )
             )
 
@@ -227,6 +242,7 @@ class BatchExport(PhaseTool):
         fbxskel_name = params.get("fbxskel_name", "")
         natives_root = params.get("natives_root", "")
         armor_scheme = params.get("armor_scheme", DEFAULT_ARMOR_SCHEME)
+        clsp_col = params.get("clsp_collection")  # None = the one collider_create imported
 
         missing_str = [
             name
@@ -261,7 +277,7 @@ class BatchExport(PhaseTool):
             mesh_cleanup_warnings = self._run_mesh_cleanup(client, mesh_col)
 
             # Step 2+3+4 — configure scene (clear old, write new bindings + settings)
-            err = self._configure_scene(
+            err, bound_clsp = self._configure_scene(
                 client,
                 armor_id=armor_id,
                 armor_variant=armor_variant,
@@ -270,6 +286,7 @@ class BatchExport(PhaseTool):
                 mesh_col=mesh_col,
                 mdf2_col=mdf2_col,
                 chain2_col=chain2_col,
+                clsp_col=clsp_col,
                 target_arm=target_arm,
                 fbxskel_name=fbxskel_name,
                 natives_root=natives_root,
@@ -307,6 +324,7 @@ class BatchExport(PhaseTool):
         diff["armor_id"] = armor_id
         diff["armor_variant"] = armor_variant
         diff["fbxskel_name"] = fbxskel_name
+        diff["clsp_collection"] = bound_clsp
         if mesh_cleanup_warnings:
             diff["mesh_cleanup_warnings"] = mesh_cleanup_warnings
         return PhaseResult.ok(diff)
@@ -371,17 +389,19 @@ class BatchExport(PhaseTool):
         mesh_col: str,
         mdf2_col: str,
         chain2_col: str,
+        clsp_col: str | None,
         target_arm: str,
         fbxskel_name: str,
         natives_root: str,
-    ) -> PhaseError | None:
+    ) -> tuple[PhaseError | None, str | None]:
+        """Returns (error or None, the clsp collection bound or None)."""
         # Build the binding statements inline:
-        # 1. Clear all existing bindings for this armor_id (all 5 parts × all filetypes)
+        # 1. Clear all existing bindings for this armor_id (all 5 parts × all filetypes + clsp)
         # 2. Write bindings only for target_parts
         clear_lines = "\n".join(
             f"scene.pop('mhws_{armor_id}_{part}_{ft}', None)"
             for part in ("1", "2", "3", "4", "5")
-            for ft in EXPORT_FILETYPES
+            for ft in (*EXPORT_FILETYPES, "clsp")
         )
         bind_lines = "\n".join(
             f"scene['mhws_{armor_id}_{part}_{ft}'] = {col!r}"
@@ -392,36 +412,75 @@ class BatchExport(PhaseTool):
                 ("chain2", chain2_col),
             ]
         )
+        # The clsp: an explicit collection, or the one RE Chain Editor's clsp import tagged
+        # (collider_create's full_body.clsp); several tagged ones without a choice is an error.
+        bind_clsp = "\n".join((
+            f"_clsp = {clsp_col!r}",
+            "_problem = ''",
+            "if _clsp is None:",
+            f"    _cands = sorted(c.name for c in bpy.data.collections if c.get('~TYPE') == {CLSP_COLLECTION_TAG!r})",
+            "    if len(_cands) > 1:",
+            "        _problem = 'clsp_ambiguous:' + ','.join(_cands)",
+            "    _clsp = _cands[0] if len(_cands) == 1 else ''",
+            "elif _clsp and bpy.data.collections.get(_clsp) is None:",
+            "    _problem = 'clsp_not_found:' + _clsp",
+        ))
         code = (
             f"import bpy\n"
             f"scene = bpy.context.scene\n"
             f"s = scene.mhw_suite_settings\n"
-            # ── clear old bindings ────────────────────────────────────────
-            f"{clear_lines}\n"
-            # ── write new bindings ────────────────────────────────────────
-            f"{bind_lines}\n"
-            # ── armor settings ────────────────────────────────────────────
-            f"scene['mhws_natives_root'] = {natives_root!r}\n"
-            f"s.mhws_armor_scheme   = {armor_scheme!r}\n"
-            f"s.mhws_selected_armor = {armor_id!r}\n"
-            f"s.mhws_armor_variant  = {armor_variant!r}\n"
-            # ── blank export + bonesystem settings ───────────────────────
-            f"s.mhws_use_blank_export = True\n"
-            f"arm_obj = bpy.data.objects.get({target_arm!r})\n"
-            f"s.mhws_fbxskel_name  = {fbxskel_name!r}\n"
-            f"s.mhws_bs_armature   = arm_obj\n"
-            f"s.mhws_use_bonesystem = True\n"
-            f"print({BLENDER_SENTINEL!r})\n"
-            f"print('CONFIGURED')\n"
+            f"{bind_clsp}\n"
+            f"if _problem:\n"
+            f"    print({BLENDER_SENTINEL!r})\n"
+            f"    print('PRECONDITION:' + _problem)\n"
+            f"else:\n"
+            + "".join(
+                f"    {line}\n"
+                for line in (
+                    # ── clear old bindings ────────────────────────────────
+                    *clear_lines.splitlines(),
+                    # ── write new bindings ────────────────────────────────
+                    *bind_lines.splitlines(),
+                    "if _clsp:",
+                    f"    for _part in {list(target_parts)!r}:",
+                    f"        scene['mhws_{armor_id}_' + _part + '_clsp'] = _clsp",
+                    # ── armor settings ────────────────────────────────────
+                    f"scene['mhws_natives_root'] = {natives_root!r}",
+                    f"s.mhws_armor_scheme   = {armor_scheme!r}",
+                    f"s.mhws_selected_armor = {armor_id!r}",
+                    f"s.mhws_armor_variant  = {armor_variant!r}",
+                    # ── blank export + bonesystem settings ───────────────
+                    "s.mhws_use_blank_export = True",
+                    f"arm_obj = bpy.data.objects.get({target_arm!r})",
+                    f"s.mhws_fbxskel_name  = {fbxskel_name!r}",
+                    "s.mhws_bs_armature   = arm_obj",
+                    "s.mhws_use_bonesystem = True",
+                    f"print({BLENDER_SENTINEL!r})",
+                    "print('CONFIGURED')",
+                    "print('CLSP:' + _clsp)",
+                )
+            )
         )
         lines = client.execute_and_extract(code)
+        if lines and lines[0].startswith("PRECONDITION:"):
+            detail = lines[0][len("PRECONDITION:"):]
+            return PhaseError(
+                category="precondition",
+                operator="",
+                message=f"Cannot tell which colliders to export: {detail}",
+                suggestion=(
+                    "Pass clsp_collection: the collider collection to export (list_collections() "
+                    "shows them), or \"\" to export a blank clsp."
+                ),
+            ), None
         if not lines or lines[0] != "CONFIGURED":
             return PhaseError(
                 category="unexpected",
                 operator="",
                 message=f"Scene configuration failed. Output: {lines!r}",
-            )
-        return None
+            ), None
+        clsp = next((ln[len("CLSP:"):] for ln in lines[1:] if ln.startswith("CLSP:")), "")
+        return None, clsp or None
 
     def _run_mesh_cleanup(
         self,
@@ -510,7 +569,9 @@ class BatchExport(PhaseTool):
             f"    print({BLENDER_SENTINEL!r})\n"
             f"    print(str(ret))\n"
         )
-        lines = client.execute_and_extract(code)
+        # Exporting shape keys (RE-Mesh-Editor-BlendShape) takes far longer than the client's
+        # 30 s default: the Maya body took ~80 s and was reported as a lost connection.
+        lines = client.execute_and_extract(code, timeout=120)
         if not lines:
             return PhaseError(
                 category="operator_failed",

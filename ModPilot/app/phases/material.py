@@ -46,6 +46,28 @@ IMAGE_EXTENSIONS: frozenset[str] = frozenset({
     ".png", ".tga", ".dds", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"
 })
 
+#: Blender-side lookup of a ModPilot slot name on a Principled BSDF. Blender 4.0 renamed the
+#: 'Emission' socket to 'Emission Color' and gave 'Emission Strength' a default of 0, which the
+#: Toolkit's generator reads as "not emissive" (core/mdf_generator_base.py): material_setup
+#: skipped every emission texture as an unknown slot and claude_run1's eye glow was wired by hand.
+SLOT_SOCKET_SRC = '''
+_SLOT_SOCKETS = {"Emission": ("Emission Color", "Emission")}
+
+
+def _slot_socket(pbs, slot):
+    for name in _SLOT_SOCKETS.get(slot, (slot,)):
+        sock = pbs.inputs.get(name)
+        if sock is not None:
+            return sock
+    return None
+
+
+def _emission_on(pbs):
+    strength = pbs.inputs.get("Emission Strength")
+    if strength is not None and not strength.is_linked and strength.default_value == 0.0:
+        strength.default_value = 1.0
+'''
+
 PRINCIPLED_SLOTS: tuple[str, ...] = (
     "Base Color", "Alpha", "Roughness", "Metallic", "Emission", "Normal"
 )
@@ -1446,6 +1468,7 @@ class MaterialInspect(PhaseTool):
             f"import bpy, json\n"
             f"_target = {target_object!r}\n"
             f"_sentinel = {BLENDER_SENTINEL!r}\n"
+            f"{SLOT_SOCKET_SRC}\n"
         )
         body = textwrap.dedent("""\
             def _trace_to_image(node, depth=0):
@@ -1479,7 +1502,7 @@ class MaterialInspect(PhaseTool):
                         )
                         if pbs is not None:
                             for slot in SLOTS:
-                                inp = pbs.inputs.get(slot)
+                                inp = _slot_socket(pbs, slot)
                                 if inp is not None and inp.is_linked:
                                     slot_state[slot] = _trace_to_image(inp.links[0].from_node)
                     connections[mat.name] = slot_state
@@ -1692,6 +1715,7 @@ class MaterialSetup(PhaseTool):
             f"_target = {target_object!r}\n"
             f"_mapping = json.loads({mapping_json!r})\n"
             f"_sentinel = {BLENDER_SENTINEL!r}\n"
+            f"{SLOT_SOCKET_SRC}\n"
         )
         # __NC__ is at 32 spaces in the source string; after dedent removes the
         # 12-space common indent it lands at 20 spaces, matching the indent level
@@ -1723,7 +1747,7 @@ class MaterialSetup(PhaseTool):
                     for slot, fp in slot_map.items():
                         if not fp:
                             continue
-                        target_inp = pbs.inputs.get(slot)
+                        target_inp = _slot_socket(pbs, slot)
                         if target_inp is None:
                             _skipped.append(mat_name + "." + slot + ".(unknown_slot)")
                             continue
@@ -1741,6 +1765,8 @@ class MaterialSetup(PhaseTool):
                                 tex.image = bpy.data.images.load(fp, check_existing=True)
                                 tex.location = (-500, y)
                                 links.new(tex.outputs["Color"], target_inp)
+                                if slot == "Emission":
+                                    _emission_on(pbs)
                             _wired.append(mat_name + "." + slot)
                         except Exception as e:
                             _skipped.append(mat_name + "." + slot + ":" + str(e))

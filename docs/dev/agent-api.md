@@ -1,13 +1,16 @@
 # Agent Callable API Reference
 
 > 当前 Agent 可调用的所有工具清单。按类别分组，供开发者查阅和扩展。
-> LLM 运行时不读此文件——工具 schema 由 `AgentLoop._build_tool_list()` 动态注入 system prompt。
+> LLM 运行时不读此文件——完整目录由 `build_full_tool_catalog()`（`app/agent/phase_loop.py`）构建，
+> 共 **30** 个工具；每个 `PhaseLoop` 只注入 `PHASE_TOOL_SUBSETS[phase]`（`app/agent/state.py`）
+> 里属于当前 phase 的子集，而非全部。
 
 ---
 
-## Phase Tools（17 个）
+## Phase Tools（20 个）
 
-推进 `_phase_idx`，完成后触发压缩 + 暂停。
+推进 `_phase_idx`（其中 13 个 `advances_phase=True`，与 13 个 phase 一一对应），完成后暂停等待用户确认。
+`app/phases/mesh_cleanup.py` 的 `MeshCleanup` **不在目录中**——其清理逻辑由 `BatchExport._run_mesh_cleanup()` 内部调用，LLM 不能直接触发。
 
 ### Setup Block
 
@@ -29,7 +32,7 @@
 
 | Tool | 底层操作 | 代码位置 |
 |------|---------|---------|
-| `PoseCorrection` | `bpy.ops.pose.transforms_clear()` → 复位姿态<br>`bpy.ops.object.transform_apply(scale=True)` → 缩放对齐<br>MMD: `bpy.ops.modder.tpose_direction()`<br>终末地: `bpy.ops.modder.apply_transform_forward()`<br>VRChat: 跳过（已在 T-pose） | `app/phases/pose_correction.py` |
+| `PoseCorrection` | `bpy.ops.pose.transforms_clear()` → 复位姿态<br>`bpy.ops.object.transform_apply(scale=True)` → 缩放对齐<br>MMD: `bpy.ops.modder.mmd_a_to_tpose()`<br>终末地: `bpy.ops.modder.apply_transform_forward()`<br>VRChat: 跳过（已在 T-pose） | `app/phases/pose_correction.py` |
 | `SkeletonAlign` | `bpy.ops.modder.universal_snap()` → X+Y 双预设骨骼对齐 | `app/phases/skeleton_align.py` |
 | `VertexGroups` | `bpy.ops.object.join()` → 合并网格<br>`bpy.ops.object.vertex_group_clean(limit=0.0)` → 清零权重<br>`bpy.ops.object.vertex_group_normalize_all()` → 归一化<br>`bpy.ops.modder.direct_convert()` → 顶点组重命名<br>`bpy.ops.object.parent_clear(type='CLEAR_KEEP_TRANSFORM')` → 重设父级 | `app/phases/vertex_groups.py` |
 
@@ -47,6 +50,13 @@
 | `PhysicsChains` | `bpy.ops.modder.clear_chain_role()` → 清除链标记<br>`bpy.ops.modder.merge_into_parent()` → 合并到父骨<br>`bpy.ops.re_chain.create_chain_header(chainFormat='.chain2')` → 创建 chain2 集合<br>`bpy.ops.mhws.auto_create_chains(settings_mode=...)` → 自动创建链结构<br>`bpy.ops.re_chain.create_chain_settings()` → 创建额外 Settings<br>`bpy.ops.re_chain.apply_angle_limit_ramp(maxAngleLimit=1.047198, maxIteration=4)` → 角度限制渐变 | `app/phases/physics_bones.py` |
 | `PhysicsAdjust` | `setattr(pg, key, val)` → 直接设置 CHAINSETTINGS 属性组参数（无 bpy.ops） | `app/phases/physics_bones.py` |
 
+### Phase 4C: Body Colliders（issue #20）
+
+| Tool | 底层操作 | 代码位置 |
+|------|---------|---------|
+| `ColliderCreate` | `bpy.ops.re_clsp.importfile(filepath=app/data/full_body.clsp.3, targetArmature=…)` → 导入 MHWilds 全身碰撞体预设（胶囊/球体，CHILD_OF 约束到身体骨）；返回已创建碰撞体 + 每个 `RE_CHAIN_CHAINGROUP` 及其 `parent_bone`，交用户确认。不推进 phase | `app/phases/physics_colliders.py` |
+| `ColliderApply` | 将用户确认的 `clspFlags0` / `clspFlags1`（full_body.clsp.3 各碰撞体的位掩码：20 个身体区域 + hip_wide 0x800000，位布局见 `app/data/clsp_body_bits.json`）写到各 `RE_CHAIN_CHAINGROUP` 对象。推进 phase | `app/phases/physics_colliders.py` |
+
 ### Phase 5: Material
 
 | Tool | 底层操作 | 代码位置 |
@@ -60,7 +70,7 @@
 
 | Tool | 底层操作 | 代码位置 |
 |------|---------|---------|
-| `BatchExport` | `bpy.ops.re_mesh.delete_loose()` — 清理游离几何<br>`bpy.ops.re_mesh.solve_repeated_uvs()` — 去重 UV<br>`bpy.ops.re_mesh.remove_zero_weight_vertex_groups()` — 删空权重组<br>`bpy.ops.re_mesh.limit_total_normalize(maxWeights='12')` — 权重上限<br>后备: `bpy.ops.object.vertex_group_limit_total(limit=12)` + `bpy.ops.object.vertex_group_normalize_all()`<br>`bpy.ops.mhws.batch_export()` → 输出 mesh + mdf2 + chain2 | `app/phases/batch_export.py` |
+| `BatchExport` | `bpy.ops.re_mesh.delete_loose()` — 清理游离几何<br>`bpy.ops.re_mesh.solve_repeated_uvs()` — 去重 UV<br>`bpy.ops.re_mesh.remove_zero_weight_vertex_groups()` — 删空权重组<br>`bpy.ops.re_mesh.limit_total_normalize(maxWeights='12')` — 权重上限<br>后备: `bpy.ops.object.vertex_group_limit_total(limit=12)` + `bpy.ops.object.vertex_group_normalize_all()`<br>`bpy.ops.mhws.batch_export()` → 输出 mesh + mdf2 + chain2 + clsp（Phase 4C 导入的 `full_body.clsp`，或 `clsp_collection`）| `app/phases/batch_export.py` |
 
 ---
 
@@ -85,11 +95,11 @@
 
 ## Meta Tools（2 个）
 
-不调用 Blender，由 `AgentLoop._execute_tool_call()` 内部处理。
+不调用 Blender，由 `PhaseLoop._execute_tool_call()` 内部处理。
 
 | Tool | 作用 | 代码位置 |
 |------|------|---------|
-| `sync_phase_state` | 更新前端进度条（断线重连/会话恢复时用） | `app/agent/loop.py` |
+| `sync_phase_state` | 更新前端进度条（断线重连/会话恢复时用） | `app/agent/phase_loop.py` |
 | `query_history` | 翻阅磁盘 MoveLog，按 phase/kind/name 过滤 | `app/agent/history.py` |
 
 ---
@@ -100,7 +110,7 @@
 
 | 类别 | 算子 |
 |------|------|
-| Modding-Toolkit 姿态 | `modder.tpose_direction`, `modder.apply_transform_forward` |
+| Modding-Toolkit 姿态 | `modder.mmd_a_to_tpose`, `modder.apply_transform_forward` |
 | Modding-Toolkit 对齐 | `modder.universal_snap`, `modder.smart_graft` |
 | Modding-Toolkit 骨骼 | `modder.direct_convert`, `modder.clear_chain_role`, `modder.merge_into_parent`, `modder.refresh_physics_bone_colors` |
 | MHWs 管线 | `mbt.import_mhwilds_fmesh`, `mhws.auto_create_chains`, `mhws.mdf_gen_refresh`, `mhws.mdf_gen_process`, `mhws.batch_export` |

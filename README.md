@@ -8,19 +8,15 @@
 
 ## Status
 
-| Phase | State |
-|-------|-------|
-| Stage 0 — connectivity verification | 🟢 done (`verify_blender_mcp.py` 5/5 passing) |
-| Stage Setup — project structure & docs | 🟢 done |
-| Stage 1 — communication backbone | 🟢 done (BlenderClient + SceneCache + LLMClient; 30 unit tests) |
-| Stage 2 — phase tool layer (videos 1-3) | 🟢 done (PoseCorrection + SkeletonAlign + VertexGroups; 76 unit tests) |
-| Stage 3 — agent loop | 🟢 done (ReAct loop + prompts + error handler + `/agent/chat`; 117 unit tests) |
-| Stage 4 — phase tools (videos 4-7) | 🟢 done: physics_bones + material + batch_export + mesh_cleanup + query tools; E2E verified (Phase 1→6 full run); advanced out of MVP scope |
-| Stage 5 — frontend (React 19 + TS + Vite + motion) | 🟢 done. Rebuilt from htmx (2026-05-18, C25). Same SSE/widget/config surfaces; ports: dev `:5173` proxied → backend `:8000`. Tauri v2 desktop shell layered on top (optional) provides native drag-and-drop file/dir paths through `PathField`. Stage-driven UI under `src/stages/` — `StageRouter` cross-fades a per-phase component (`Phase1Stage`, `Phase23Stage` shared by phase_2+3, `Phase4Stage` shared by phase_35+4a+4b, `Phase5Stage`, `Phase6Stage`, `DoneStage`), chat moved to a collapsible bottom `ChatStrip`. |
-| Stage MVP — verification | 🟢 done (L3 in-game acceptance: 3-4 MMD/VRC models verified; `verify_mvp.py` script + `docs/user/demo_setup.md` walkthrough) |
-| Post-MVP polish | ongoing — #13 arm-bone scale, #14 interrupt, #15 phase transition pause, #16 Phase 5A small-loop architecture, frontend React/Tauri rebuild, single-pick Body part radio (default `Body`), "Mod Output" rename. 2026-05-19: `setup_import_source` FBX phase tool + LLM provider/model guardrail; later same day, context-management layer (off-prompt move log + phase-boundary compaction + `query_history` meta-tool + session recovery + FE session_id persistence). **526 unit tests, 70+ Playwright checks.** |
-
+**MVP shipped** — Stages 0 / Setup / 1 / 2 / 3 / 4 / 5 / MVP-verification all 🟢, L3 in-game
+acceptance against MMD/VRC source models. **672 unit tests**, 70+ Playwright checks.
 All design items in [docs/dev/design.md](docs/dev/design.md) (A/B/C/D/E layers) are 🟢 decided.
+
+| Milestone | State |
+|-----------|-------|
+| Post-MVP polish | ongoing — see [docs/dev/backlog.md](docs/dev/backlog.md) for open P1-P3 items |
+| Latest shipped | #19 texture-slot fix, #20 hierarchical loop split + Phase 4C colliders, #21 `RE_CHAIN_HEADER` calibration, #22 VLM-assisted PBR classification — dated detail in [CHANGELOG.md](CHANGELOG.md) |
+| First full agent-path export | 🟢 2026-08-06 — Maya Ver1.02.2 → mesh/mdf2/chain2 + 19 tex + fbxskel in `ModPilot/artifacts/e2e_mod_out`. Needed two manual assists (lesson `#34`); textures must be pak'd to load (`#35`). L3 in-game check still outstanding. |
 
 ---
 
@@ -54,8 +50,9 @@ Tauri desktop shell (modpilot.exe) ─────────┤  (browser-mode
                           React SPA (motion + structured JSON SSE)
                                             │
                           FastAPI backend (CORS / Vite proxy)
-                            ├── Agent loop          (ReAct, hand-rolled, ~600 lines)
-                            ├── Phase tools         (16 tools across setup + phases 1-6)
+                            ├── Agent loop          (hand-rolled ReAct: RouterLoop + 13 PhaseLoops)
+                            ├── Phase tools         (30-tool catalog across 13 phases; each
+                            │                        PhaseLoop sees only its own subset)
                             ├── LLM client          (provider-agnostic: Anthropic / OpenAI-compatible / Ollama)
                             └── Blender client      (TCP socket, thread-safe RLock)
                                             ↓
@@ -66,7 +63,8 @@ Tauri desktop shell (modpilot.exe) ─────────┤  (browser-mode
 
 **Key architectural decisions**:
 
-- **Phase tool middle layer**, not raw operator wrappers. LLM orchestrates *between* phases and makes *classification* decisions inside phases; deterministic Python orchestrates *within* phases. (B6, [project memory](.claude/projects/.../memory/project_python_over_llm.md))
+- **Phase tool middle layer**, not raw operator wrappers. LLM orchestrates *between* phases and makes *classification* decisions inside phases; deterministic Python orchestrates *within* phases. (B6)
+- **Hierarchical agent loop** — a dumb `RouterLoop` owns session-wide state (phase index, move log, SSE sink) and delegates each turn to one of 13 per-phase `PhaseLoop` instances, each carrying only its own scoped system prompt + tool subset. Cut the per-request token floor from ~30.6k to ~4-7.5k. (see [docs/dev/refactor_hierarchical_loop.md](docs/dev/refactor_hierarchical_loop.md))
 - **Provider-agnostic LLM client** (~150 lines). Default DeepSeek V4 for development; Claude Sonnet 4.6 / Haiku 4.5 as oracle fallback; Ollama Cloud (`deepseek-v4-flash`) as a third option. Runtime-switchable via `/config` UI — no restart needed. (C10)
 - **No RAG in MVP** — `docs/agent/agent_workflow.md` (machine-readable execution manual) goes directly into system prompt + prompt cache. `plan.md` is the video script for humans only. Content RAG retained as a future upgrade path. (C11)
 - **React 19 + TypeScript + Vite** frontend, with `motion` for transitions; same SSE event surface as the original htmx build. **Tauri v2** ships an optional Rust desktop shell so the path inputs can accept native file/directory drag-and-drop (impossible inside a browser sandbox). (C25 — supersedes C12)
@@ -102,52 +100,28 @@ REE-ModPilot/
 │   ├── uv.lock
 │   ├── .env.example
 │   ├── app/
-│   │   ├── main.py               # FastAPI app; /health /scene_info /agent/chat
-│   │   │                         #   GET / + /agent/messages + /agent/stream/{sid}
-│   │   │                         #   /agent/widget/{classification,material}
-│   │   │                         #   /app/config GET+POST + /config UI
-│   │   │                         #   /viewport_screenshot + /app/x_presets
-│   │   ├── config.py             # Settings (LLM / Blender / vision model); runtime-mutable
-│   │   ├── blender/              # BlenderClient (thread-safe RLock, BlenderBusyError) + SceneCache
-│   │   ├── llm/                  # Provider-agnostic LLMClient (Anthropic + OpenAI + Ollama)
-│   │   ├── agent/                # ReAct loop, prompt builders, error handler
-│   │   └── phases/               # Phase tools: setup (validate+infer+import), pose_correction,
-│   │                             #   skeleton_align, vertex_groups, physics_bones, material,
-│   │                             #   batch_export, query_tools; advanced out of MVP scope
-│   ├── frontend/                 # React 19 + TypeScript + Vite + motion (replaces former
-│   │   │                         #   templates/ + static/ + htmx setup)
-│   │   ├── src/
-│   │   │   ├── pages/            #   ChatPage (orchestrator: Shell + StageRouter + ChatStrip) + ConfigPage
-│   │   │   ├── stages/           #   StageRouter + per-phase stages (Phase1Stage, Phase23Stage,
-│   │   │   │                     #     Phase4Stage, Phase5Stage, Phase6Stage, DoneStage) +
-│   │   │   │                     #     FallbackStage for unmigrated phases; STAGE_REGISTRY
-│   │   │   ├── components/       #   Shell, ChatStrip, SessionConfigForm, PathField (drag-drop),
-│   │   │   │                     #     ChatLog, PhaseStepper, ViewportPane, widgets, ErrorChoice, …
-│   │   │   ├── hooks/            #   useChatState (incl. ToolRun[] tracking), useSSE
-│   │   │   ├── lib/              #   api, session, desktop (Tauri bridge w/ browser fallback)
-│   │   │   └── types/            #   api, sse, domain
-│   │   ├── src-tauri/            #   Rust shell (Tauri v2; dialog plugin; window center fix)
-│   │   ├── vite.config.ts        #   /agent /app /viewport_screenshot /health proxied to :8000
-│   │   └── package.json          #   pnpm; scripts: dev, build, tauri:dev, tauri:build
-│   ├── artifacts/                # Generated; gitignored. Includes ui_walkthroughs/<stamp>/walkthrough.webm
-│   └── tests/
-│       ├── unit/                 # mock Blender + mock LLM
-│       ├── integration/          # real Blender required; marker-gated
-│       └── e2e/                  # Playwright browser smokes; opt-in install
+│   │   ├── main.py               # FastAPI routes (chat, SSE, widgets, config, screenshot)
+│   │   ├── config.py             # Settings (LLM / Blender / vision); runtime-mutable
+│   │   ├── config_store.py       # ~/.modpilot/config.json persistence
+│   │   ├── toolkit_probe.py      # Modding-Toolkit presence / version probe
+│   │   ├── agent/                # RouterLoop + 13 PhaseLoops, prompts, MoveLog, DSML parser
+│   │   ├── blender/              # BlenderClient (thread-safe), SceneCache, preset_catalog
+│   │   ├── llm/                  # LLMClient (Anthropic / OpenAI-compatible / Ollama) + vision
+│   │   ├── data/                 # armor_sets, physics_presets, clsp body bits
+│   │   └── phases/               # 21 phase tools (30-tool catalog incl. query + meta tools)
+│   ├── frontend/                 # React 19 + TS + Vite + motion SPA
+│   │   ├── src/                  #   pages, stages (per-phase UI), components, hooks, lib, types
+│   │   └── src-tauri/            #   Tauri v2 Rust shell — see docs/dev/desktop_build.md
+│   ├── scripts/ eval/            # Playwright walkthrough recorders; context-eval harness
+│   ├── artifacts/                # Generated; gitignored. Mod exports + walkthrough webms
+│   └── tests/                    # unit (mocked) | integration (real Blender) | e2e (Playwright)
 ├── docs/
-│   ├── agent/                    # agent_workflow.md (injected into LLM system prompt)
-│   ├── dev/                      # design.md, backlog.md, plugin_api.md, etc.
-│   └── user/                     # demo_setup.md, plan.md
-│   ├── design.md                 # A/B/C/D/E-layer design decisions (🟢 all decided)
-│   ├── backlog.md                # P0-P3 implementation tasks with status badges
-│   ├── agent_workflow.md         # Machine-readable execution manual for the agent
-│   ├── plan.md                   # 7-video workflow script (human reference only)
-│   ├── plugin_api.md             # Modding-Toolkit operator reference
-│   └── demo_setup.md             # Blender addon install, MMD model setup, mod folder layout,
-│                                 #   verify_mvp_config.json field reference, L3 acceptance procedure
-├── verify_blender_mcp.py         # Stage 0 verification (5 checks)
-├── verify_mvp.py                 # MVP end-to-end script (bypasses agent loop; drives phase tools
-│                                 #   directly via config JSON; exit-code-correlated; --report flag)
+│   ├── agent/                    # agent_workflow.md — injected into the LLM system prompt
+│   ├── dev/                      # design, backlog, plugin_api, agent-api, lessons-detail, …
+│   └── user/                     # plan.md (7-video script), demo_setup.md
+├── verify_blender_mcp.py         # Stage 0 connectivity verification (5 checks)
+├── verify_mvp.py                 # Headless E2E script — drives phase tools directly, no agent loop
+├── lesson.md                     # Session primer + trimmed lesson log — read this first
 ├── README.md                     # ← you are here
 ├── CLAUDE.md                     # Claude-specific working notes
 └── AGENTS.md                     # Contributor baseline (commands, conventions)
@@ -219,7 +193,7 @@ Fill in the session-config form (source file path, mod root, character name, bod
 **5. Run unit tests**
 
 ```bash
-uv run pytest -m unit -v   # 526+ tests, no Blender required
+uv run pytest -m unit -v   # 672 tests, no Blender required
 ```
 
 **6. (Optional) Headless MVP verification**
@@ -233,63 +207,19 @@ See `docs/user/demo_setup.md` for prerequisite addon install order, MMD model re
 
 ---
 
-## Building the desktop installer
-
-The Tauri shell can ship as a single-click installer that bundles the FastAPI backend as a pyinstaller-frozen sidecar — end users get one `.msi` / `.exe`, no Python install needed.
-
-```bash
-# 1. Freeze the backend (run from ModPilot/)
-.venv/Scripts/pyinstaller.exe modpilot_backend.spec --clean --noconfirm
-
-# 2. Stage the dist into the Tauri binaries dir
-rm -rf frontend/src-tauri/binaries/backend
-cp -r dist/modpilot-backend frontend/src-tauri/binaries/backend
-
-# 3. Build the installer (PowerShell, with cargo on PATH)
-cd frontend
-pnpm tauri build           # produces target/release/bundle/{msi,nsis}/
-```
-
-Output: `~25 MB` MSI and NSIS installers. On launch the bundled `modpilot.exe` spawns the sidecar on `:8000`, displays a splash until `/health` returns, then mounts the React UI. On exit (window-close OR hard-kill via `taskkill /F`), the sidecar dies with the parent — the Windows Job Object binding in `src-tauri/src/lib.rs` ensures no orphans.
-
-### Code signing
-
-Without a code-signing cert, Windows SmartScreen warns on first launch ("unrecognized publisher"). End users see a blue dialog and must click "More info → Run anyway".
-
-**Pipeline is ready** — just supply a cert:
-
-```powershell
-# Set the cert thumbprint (SHA1 of cert in Cert:\CurrentUser\My)
-$env:TAURI_SIGNING_CERT_THUMBPRINT = "abc123..."
-
-# Tauri's bundle pipeline signs modpilot.exe + the installers automatically
-# (digestAlgorithm + timestampUrl are already in tauri.conf.json).
-pnpm tauri build
-
-# Tauri does NOT sign the bundled sidecar exe — run our wrapper to sign
-# everything (parent + sidecar + installers).
-.\src-tauri\scripts\sign_bundle.ps1
-```
-
-**For local / internal-distribution testing** (signs cleanly on machines that trust your cert, still SmartScreen-flagged elsewhere):
-
-```powershell
-# Generates a self-signed cert, installs it in your cert stores, prints thumbprint
-.\src-tauri\scripts\generate_dev_cert.ps1
-```
-
-**For production** (no SmartScreen warning): purchase an **EV code-signing cert** from a CA (Sectigo, DigiCert, GlobalSign — $200-500/yr). Standard OV certs require a 7-day reputation warmup period; EV certs skip it. Both work with the pipeline above; EV is dispensed on a USB token, so the build machine needs access to the token at sign time.
-
----
-
 ## References
 
 | Doc | Purpose |
 |-----|---------|
-| [docs/dev/design.md](docs/dev/design.md) | A/B/C/D-layer design decisions log (rationale, alternatives considered, escape hatches) |
-| [docs/dev/backlog.md](docs/dev/backlog.md) | P0-P3 implementation backlog with status badges |
-| [docs/agent/agent_workflow.md](docs/agent/agent_workflow.md) | Machine-readable execution manual for the agent (phases 1-6, protocols, operator index) |
-| [docs/user/plan.md](docs/user/plan.md) | 7-video mod-making workflow script (human reference; not injected into agent) |
+| [lesson.md](lesson.md) | Session primer + trimmed lesson log (`#NN`; depth in `docs/dev/lessons-detail.md`) |
+| [CLAUDE.md](CLAUDE.md) | Claude-specific working notes (footguns, blender-mcp wire protocol, memory map) |
+| [AGENTS.md](AGENTS.md) | Agent / contributor baseline (commands, hard rules, conventions) |
+| [CHANGELOG.md](CHANGELOG.md) | Dated release history; [docs/dev/backlog.md](docs/dev/backlog.md) for open P1-P3 work |
+| [docs/dev/design.md](docs/dev/design.md) | A/B/C/D/E-layer design decisions (rationale, alternatives, escape hatches) |
+| [docs/agent/agent_workflow.md](docs/agent/agent_workflow.md) | Machine-readable execution manual (phases 1-6, protocols, operator index) |
 | [docs/dev/plugin_api.md](docs/dev/plugin_api.md) | Modding-Toolkit operator API reference |
-| [CLAUDE.md](CLAUDE.md) | Claude-specific working notes (footguns, memory map) |
-| [AGENTS.md](AGENTS.md) | General agent / contributor baseline (commands, hard rules, conventions) |
+| [docs/dev/agent-api.md](docs/dev/agent-api.md) | Agent-callable tool catalog |
+| [docs/dev/refactor_hierarchical_loop.md](docs/dev/refactor_hierarchical_loop.md) | RouterLoop + PhaseLoop architecture |
+| [docs/dev/desktop_build.md](docs/dev/desktop_build.md) | Tauri installer build + code signing |
+| [docs/user/plan.md](docs/user/plan.md) | 7-video mod-making workflow script (human reference) |
+| [docs/user/demo_setup.md](docs/user/demo_setup.md) | Addon install order, model setup, L3 acceptance procedure |

@@ -1,40 +1,50 @@
 # CLAUDE.md
 
-**Always read [lesson.md](lesson.md) at the start of every conversation in this project** — it is the orientation primer (layout, current state, run commands, hard rules) and the fix log of past mistakes worth avoiding. Read it before anything else.
+**Always read [lesson.md](lesson.md) at the start of every conversation in this project** — orientation primer, run commands, hard rules, and the trimmed lesson log. Read it before anything else.
 
 Working notes specific to Claude Code / Claude API agents in this repo.
-
-For project overview see [README.md](README.md).
-For agent baseline rules (commands, hard rules, code style, conventions) see [AGENTS.md](AGENTS.md).
 
 ---
 
 ## Read These First (in order)
 
-1. [lesson.md](lesson.md) — Orientation primer + fix log. Hard requirement: read first, every session.
-2. [README.md](README.md) — Project at a glance, status, architecture, tech stack.
+1. [lesson.md](lesson.md) — Primer + lesson log. Hard requirement: read first, every session.
+2. [README.md](README.md) — Status, architecture, layout, prerequisites.
 3. [AGENTS.md](AGENTS.md) — Hard rules + commands + style + workflow.
-4. [docs/dev/design.md](docs/dev/design.md) — All 15 design decisions with rationale (A/B/C/D layers, all 🟢).
-5. [docs/dev/backlog.md](docs/dev/backlog.md) — Current implementation tasks (P0-P3 with status badges).
-6. [docs/user/plan.md](docs/user/plan.md) — The 7-video mod-making workflow being automated.
-7. [docs/dev/plugin_api.md](docs/dev/plugin_api.md) — Modding-Toolkit operator reference (the "API" being wrapped).
 
----
+Everything else is opened **on demand**, not up front: `docs/dev/lessons-detail.md` by lesson ID,
+`docs/dev/design.md` for a decision's rationale, `docs/dev/backlog.md` for open work,
+`docs/dev/plugin_api.md` for an operator signature, `docs/user/plan.md` for the video workflow.
+
+## Doc-weight discipline (2026-08-06)
+
+`lesson.md` had grown to ~8.5k tokens and README to ~5.5k — both loaded every session. Keep them thin:
+
+- **lesson.md** = ONE trimmed bullet per fix, ≤3 lines / ≤300 chars, stable `#NN`, newest at top.
+  Depth goes to [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md) under the same ID with a
+  `(→detail)` marker. A `PreToolUse` hook (`~/.claude/hooks/lesson_format_check.py`) enforces the
+  limit — it matches on the `**#NN**` prefix, so an ID-less bullet silently bypasses the gate.
+- **README.md** = pointers and skeletons, not prose. Release-time detail lives in
+  `docs/dev/desktop_build.md`; dated history in `CHANGELOG.md`.
+- **Episodic "what happened / what shipped"** goes to the **context-manager**, not into these files —
+  it is indexed, drillable by `entry_id`, and doesn't tax every future session's context.
 
 ## Current Stage
 
-**MVP shipped.** All P0 work in [docs/dev/backlog.md](docs/dev/backlog.md) is 🟢: Stages 0 / Setup / 1 / 2 / 3 / 4 / 5 / MVP-verification.
-Backend (FastAPI + hand-rolled ReAct + 16 phase tools), frontend (React 19 + TypeScript + Vite + motion SPA under `ModPilot/frontend/`, with optional Tauri v2 desktop shell; same SSE + widget + viewport surfaces, now driven by per-phase stages — see C25), LLM provider abstraction (Anthropic + OpenAI-compatible + Ollama), and `verify_mvp.py` headless harness all live.
-Live with **526+ unit tests** and 70+ Playwright e2e checks. L3 acceptance achieved against MMD/VRC source models.
+**MVP shipped**; current work is post-MVP polish (P1 → P3 in the backlog). 672 unit tests green,
+70+ Playwright checks, L3 acceptance against MMD/VRC models. Architecture: FastAPI + hand-rolled
+ReAct (`RouterLoop` + 13 `PhaseLoop`s, 30-tool catalog) + React 19/Vite SPA + optional Tauri v2 shell.
 
-Current work is post-MVP polish — backlog item priorities P1 → P3.
-Recently shipped: #10 (config hoist) → #11 (material widget pre-fill) → #13 (arm-bone scale) → #14 (interrupt) → #15 (phase transition pause) → #16 (Phase 5A small loop) → 2026-05-19: `setup_import_source` FBX tool + LLM provider/model guardrail; later same day, context-management layer (`app/agent/history.py` — off-prompt move log + phase-boundary compaction + `query_history` meta-tool + cold-start session recovery; FE session_id persisted in `localStorage`).
+Latest milestone — **2026-08-06, first full export through the agent path** (Maya Ver1.02.2 →
+`ModPilot/artifacts/e2e_mod_out`), not yet autonomous and not yet L3-verified. Blockers and
+diagnostics are lessons `#33`/`#34`/`#35`. For dated history see [CHANGELOG.md](CHANGELOG.md); for
+live status see the context-manager board injected at session start.
 
 ---
 
 ## blender-mcp Wire Protocol (footgun-prone — read carefully)
 
-Read directly from [blender-mcp/addon.py](blender-mcp/addon.py); do **not** trust the README in `blender-mcp/` — it describes `server.py`'s MCP wrapper, not the raw socket protocol.
+Read `addon.py` directly from wherever blender-mcp is installed — it is **not vendored here** (see Prerequisites in [README.md](README.md); typically `%APPDATA%\Blender Foundation\Blender\4.3\scripts\addons\blender-mcp\addon.py` or your clone of [ahujasid/blender-mcp](https://github.com/ahujasid/blender-mcp)). Do **not** trust that repo's README — it describes `server.py`'s MCP wrapper, not the raw socket protocol.
 
 - **Request**: pure JSON object, **no newline / no length prefix**.
 
@@ -63,9 +73,12 @@ Persistent context for Claude (in `~/.claude/projects/.../memory/`):
 | File | Type | Summary |
 |------|------|---------|
 | `MEMORY.md` | index | One-line pointers to each memory below |
+| `feedback_english_to_kevin.md` | feedback | The 中文 policy governs the runtime agent, not Claude Code — reply to kevin in English |
 | `feedback_planning_first.md` | feedback | Don't jump from tech-validation to implementation; use design docs |
 | `feedback_discuss_alternatives.md` | feedback | Discuss unsuitable options too — user uses this project as a learning vehicle |
 | `project_python_over_llm.md` | project | LLM only at phase-internal classification points; deterministic Python everywhere else |
+| `project_state_2026_08.md` | project | kevin drives this solo since ~July 2026; Aug-6 first-export milestone + working runtime setup |
+| `project_may_leftovers.md` | project | What the archived May-19 session logs / eval report are; both bugs they exposed are fixed at HEAD |
 | `recall_as_template.md` | reference | Project structure (README/CLAUDE/AGENTS/backlog) borrows from YoungZ2357/Recall |
 
 ---
@@ -73,13 +86,7 @@ Persistent context for Claude (in `~/.claude/projects/.../memory/`):
 ## Project-Specific Quirks & Rules
 
 - **User Platform**: Windows 11 and Blender 4.3.2.
-- **Language Policy**:
-  - **Communication**: Use **中文** as the primary language for reply, while keeping **technical terms in English** to maintain precision and technical purity.
-  - **Deliverables**: All code comments, documentation, and technical strings must be in **pure English**.
-- **Interaction Style**:
-  - **Verbosity**: Maintain conciseness. Expand on details only when technically necessary or explicitly requested.
-  - **No Guessing**: If requirements are ambiguous or information is missing, **ask for clarification**. Do not proceed based on assumptions.
-  - **Critical Analysis**: Perform a critical review of any code provided by the user. If errors, inefficiencies, or logic flaws are found, point them out directly.
-- **Workflow Constraints**:
-  - **Plan-then-Code**: Follow a "Plan-then-Code" sequence. Present a conceptual or structural plan first. **Do not** generate implementation code until the plan has been explicitly confirmed by the user.
-  - **Strict Scope**: Implement only the components explicitly requested. Do not proactively add unrequested features, extra utilities, or "helpful" optimizations.
+- **Working rules**: kevin's global `~/.claude/CLAUDE.md` governs work here (TDD; ask when an instruction
+  is unclear; follow his decisions and discuss before changing one). The language, interaction and
+  workflow rules Dimi set at the project's start (cf872ef, 2026-05-09: reply in 中文, plan-then-code,
+  strict scope) were dropped on 2026-10-16, when kevin took the project over.

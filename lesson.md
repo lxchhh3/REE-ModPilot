@@ -1,102 +1,68 @@
-# REE-ModPilot
+# REE-ModPilot — Session Primer
 
-> Read this file at the start of every session. Orientation up top so you don't have to re-explore; lesson log at the bottom so you don't repeat past mistakes.
+> Read this at the start of every session: orientation up top, lesson log at the bottom.
+>
+> **Keep it thin.** Each lesson is ONE trimmed bullet (≤3 lines / ≤300 chars) carrying a stable
+> `#NN`. IDs are never renumbered or reused — cross-refs point here. Depth for the deep ones
+> (`→detail`) lives in [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md); open it **by ID**,
+> never wholesale. Highest ID so far = **#56**; the next new lesson is #57.
+> Episodic "what happened / what shipped" narrative belongs in the context-manager, not here.
 
 ---
 
 ## What this project is
 
-AI-guided Blender automation for crafting **RE Engine** character mods (MHWs / MHWI / RE4 / RE9). A FastAPI backend that drives Blender through the `blender-mcp` socket (port 9876), orchestrating the **Modding-Toolkit** Blender addon's `bpy.ops.modder.* / mhws.*` operators. The LLM makes classification decisions *inside* phase tools and orchestrates *between* phases; deterministic Python handles everything within a phase. MVP target: MHWs single-game, full plan.md videos 1-7, L3 acceptance (mod runs in-game).
+AI-guided Blender automation for **RE Engine** character mods (MHWs / MHWI / RE4 / RE9). A FastAPI
+backend drives Blender over the `blender-mcp` socket (port 9876), orchestrating the **Modding-Toolkit**
+addon's `bpy.ops.modder.* / mhws.*` operators. The LLM makes classification decisions *inside* phase
+tools and orchestrates *between* phases; deterministic Python handles everything within a phase.
+MVP target: MHWs single-game, plan.md videos 1-7, L3 acceptance (mod runs in-game).
 
-## Layout
+## Where to look
 
-```
-REE-ModPilot/
-├── ModPilot/                     # FastAPI backend (uv-managed)
-│   ├── app/
-│   │   ├── main.py               # routes: /, /health, /scene_info, /agent/chat (legacy),
-│   │   │                         #         /agent/messages, /agent/stream/{sid}, /exec (debug)
-│   │   ├── agent/loop.py         # hand-rolled ReAct; AgentLoop.step() is the entry point
-│   │   ├── agent/error_handler.py
-│   │   ├── agent/prompts.py
-│   │   ├── blender/client.py     # TCP socket to blender-mcp addon (port 9876)
-│   │   ├── blender/state.py      # SceneCache
-│   │   ├── llm/client.py         # Provider-agnostic; from_settings() picks adapter
-│   │   ├── llm/{anthropic,openai}_provider.py
-│   │   ├── phases/               # one module per phase tool, all subclass PhaseTool
-│   │   │                         # (pose_correction, skeleton_align, vertex_groups,
-│   │   │                         #  physics_bones, material, batch_export, mesh_cleanup,
-│   │   │                         #  query_tools, setup)
-│   │   └── routes/               # currently empty; routes live in main.py
-│   ├── frontend/                 # React 19 + TS + Vite + motion SPA (replaces former htmx setup)
-│   │   ├── src/{pages,components,hooks,lib,types}/   # ChatPage + ConfigPage; PathField w/ drag-drop
-│   │   ├── src-tauri/            # Tauri v2 Rust shell (dialog plugin; center:true fix; modpilot.exe)
-│   │   ├── vite.config.ts        # proxies /agent /app /viewport_screenshot /health → :8000
-│   │   └── package.json          # pnpm; dev / build / tauri:dev / tauri:build scripts
-│   ├── artifacts/                # generated; gitignored. ui_walkthroughs/<stamp>/walkthrough.webm
-│   └── tests/{unit,integration,e2e}/   # e2e = Playwright browser smokes (opt-in: error_choice_ui.py, session_config_form.py)
-├── cli.py                        # interactive CLI client (talks to POST /agent/chat)
-├── verify_blender_mcp.py         # Stage 0 connectivity smoke (5 checks)
-├── docs/
-│   ├── agent/                    # agent_workflow.md (injected into LLM system prompt)
-│   ├── dev/                      # design.md, backlog.md, plugin_api.md, etc.
-│   └── user/                     # demo_setup.md, plan.md
-├── README.md, CLAUDE.md, AGENTS.md
-└── lesson.md                     # this file
-```
-
-## Shipped-work history
-
-Dated "Last updated" entries with full design rationale, file maps, and test deltas live in **[docs/dev/backlog.md](docs/dev/backlog.md)**. This file used to mirror them in "Current state" blocks — those were dropped to stop the duplication. Below: stable run commands, reference pointers, hard rules, and the lesson log.
+| Need | File |
+|------|------|
+| Layout, status, architecture, prerequisites | [README.md](README.md) |
+| Claude footguns, blender-mcp wire protocol, memory map | [CLAUDE.md](CLAUDE.md) — **always read** |
+| Hard rules, commands, naming/style | [AGENTS.md](AGENTS.md) |
+| Shipped work + dated rationale | [CHANGELOG.md](CHANGELOG.md), [docs/dev/backlog.md](docs/dev/backlog.md) |
+| Design decisions (A/B/C/D/E, all 🟢) | [docs/dev/design.md](docs/dev/design.md) |
+| Agent execution manual (goes into the system prompt) | [docs/agent/agent_workflow.md](docs/agent/agent_workflow.md) |
+| Modding-Toolkit operator reference | [docs/dev/plugin_api.md](docs/dev/plugin_api.md) |
+| Agent-callable tool catalog | [docs/dev/agent-api.md](docs/dev/agent-api.md) |
+| Router/PhaseLoop architecture | [docs/dev/refactor_hierarchical_loop.md](docs/dev/refactor_hierarchical_loop.md) |
+| Lesson depth, by ID | [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md) |
 
 ## How to run
 
 ```bash
 # One-time
-cd ModPilot
-uv sync                                              # install from uv.lock
+cd ModPilot && uv sync
 
-# Backend dev server (Blender should be running for full agent paths; addon enabled, "Connect to Claude" clicked)
+# Backend (Blender running, addon enabled, "Connect to Claude" clicked)
 uv run uvicorn app.main:app --reload                 # http://127.0.0.1:8000/
 
-# Frontend dev server — pick one:
-#   (a) Browser mode (fast HMR; text-only path inputs — no drag-and-drop in browser sandbox)
-cd frontend && pnpm install && pnpm dev              # http://localhost:5173/ (proxies /agent /app /viewport_screenshot /health → :8000)
-#   (b) Tauri desktop mode (native drag-drop file/dir paths in PathField)
-cd frontend && pnpm tauri:dev                        # spawns modpilot.exe; auto-rebuilds Rust on src-tauri/ change (~7s)
+# Frontend — (a) browser: fast HMR, text-only paths | (b) Tauri: native drag-drop paths
+cd frontend && pnpm install && pnpm dev              # http://localhost:5173/ (proxies → :8000)
+cd frontend && pnpm tauri:dev                        # spawns modpilot.exe
 
-# CLI client (parallel to web UI; shares app.state.agent_sessions by session_id)
-python cli.py
+python cli.py                                        # CLI client (shares agent_sessions by session_id)
 
 # Tests
-uv run pytest -m unit                                # no Blender required
+uv run pytest -m unit                                # 672 tests, no Blender required
 uv run pytest -m integration                         # requires Blender on 9876
-uv run pytest tests/unit/test_agent_loop_events.py   # single file
-uv run ruff check app tests
+uv run ruff check app tests                          # NOTE: 94 pre-existing violations, not clean
+uv run python ../verify_blender_mcp.py               # Stage 0 connectivity smoke
 
-# Playwright browser smokes (issues #2 + #3; opt-in)
+# Playwright browser smokes (opt-in; uvicorn must be running on 8000)
 # One-time: uv add --dev playwright && uv run playwright install chromium
-uv run python tests/e2e/error_choice_ui.py           # issue #2 — uvicorn must be running on 8000
-uv run python tests/e2e/session_config_form.py       # issue #3 — same server prerequisite
-
-# Stage 0 connectivity smoke
-uv run python ../verify_blender_mcp.py
+uv run python tests/e2e/error_choice_ui.py
 ```
 
-## Where to dive deeper
+## Hard rules, for the agent LLM (non-negotiable)
 
-- `CLAUDE.md` — Claude-specific footguns, the blender-mcp wire protocol cheat sheet, memory map. **Always read.**
-- `AGENTS.md` — hard rules sourced from design.md, common commands, naming/style.
-- `docs/dev/design.md` — A/B/C/D/E-layer design decisions (all 🟢 decided). Rationale + alternatives + escape hatches.
-- `docs/dev/backlog.md` — P0-P3 implementation tasks with status badges.
-- `docs/agent/agent_workflow.md` — machine-readable execution manual for the agent (the "system prompt extension").
-- `docs/dev/plugin_api.md` — Modding-Toolkit operator reference (the "API" the agent wraps).
-- `docs/user/plan.md` — 7-video mod-making workflow (human reference only; not injected into the agent).
-
-## Hard rules, for agent llm (non-negotiable)
-
-> **Not for Claude Code.** This section codifies what the ReAct agent loop must enforce — design invariants for the runtime LLM (LLM-as-orchestrator, no `execute_code` escape hatch, structured errors, etc.). It is **not** an operating manual for me. My rules live in CLAUDE.md + memory.
-
+> **Not for Claude Code.** These are design invariants the ReAct loop must enforce on the runtime
+> LLM. My own rules live in CLAUDE.md + memory.
 
 1. LLM never manages operator-level calls. It picks phases and makes classification decisions inside them.
 2. No `execute_code` exposed as an LLM tool in MVP.
@@ -106,47 +72,76 @@ uv run python ../verify_blender_mcp.py
 6. Don't modify existing tests unless the task is about them. Add new tests instead.
 7. Communication with user: 中文; code/comments/commits: pure English.
 
-## Project quirks worth remembering
+## Project quirks
 
 - Windows 11 + Blender 4.3.2. PowerShell ≠ Bash syntax (see global lesson.md).
-- `blender-mcp/addon.py` is installed into Blender separately, NOT vendored. Don't look for `blender-mcp/` in this repo.
-- `LLMClient.chat()` is **synchronous** in both providers. Token streaming is not supported. SSE granularity is at the tool-call / phase-advance level (L2), not tokens.
-- DeepSeek V4 sometimes emits tool calls as inline DSML markup (`<｜｜DSML｜｜tool_calls>...`) instead of using the API's `tool_calls` field. `loop.py` parses both paths. New emit sites must cover both.
+- `blender-mcp/addon.py` is installed into Blender separately, NOT vendored — don't look for it here.
+- `LLMClient.chat()` is **synchronous** in both providers. No token streaming; SSE granularity is at
+  the tool-call / phase-advance level (L2).
+- DeepSeek V4 sometimes emits tool calls as inline DSML markup instead of the API's `tool_calls`
+  field. `app/agent/dsml.py` parses both paths — new emit sites must cover both.
 
 ---
 
 # Lesson Log
 
-<!-- One line per fix: symptom → resolution. Newest at top. -->
-- `vision_available()` snapshots `settings.vision_model` on first call (issue #22 spec §配置探测规则 demands the cache) → tests that mutate `settings.vision_model` directly observe a stale value until `refresh_vision_cache()` runs. POST `/app/config` invalidates on every save so the FE sees fresh state on the next GET; tests must do it manually. Even `patch("app.llm.vision_client.settings") as mock_settings` doesn't bypass it — the cache stores the resolved bool, not a settings reference, so swapping the module's settings object alone doesn't help. Pattern: `refresh_vision_cache(); settings.vision_model = "X"; assert vision_available() is True` and a `finally` that resets `vision_model = ""` + `refresh_vision_cache()` so the next test isn't poisoned. Diagnostic when a vision test flakes by ordering: grep the failing file for `refresh_vision_cache` — if it's missing on the mutation path, the prior test's cached value is leaking through. Cache exists for spec compliance, not perf (`bool(str)` is free); the symptom you'll actually hit is test-isolation drift, not slow calls.
-- Context-management compaction needs TWO flags on AgentLoop, not one. `_phase_just_advanced` (Issue #15) drives the IN-TURN wrap-up llm.chat — set when `_phase_idx += 1`, consumed at the end of `_run_react_turn`, reset same turn. `_just_completed_phase` (this work) drives the NEXT-TURN compaction — set in the same place, consumed at the TOP of the next `_run_react_turn`, reset there. Don't collapse them into one flag: the wrap-up message has to land in history BEFORE compaction reads it as the summary text, so the two events fire on opposite sides of an `await asyncio.to_thread(self._llm.chat, ...)` boundary that spans two user turns. Also: the wrap-up `assistant` move logged in `step()` carries the NEW phase in its `phase` field (because `_phase_idx` already incremented before `step()` appended), so when hydrating from `moves.jsonl` you cannot filter by phase to find the wrap-up — use append order + look for the first `assistant` move AFTER the `phase_advance` entry.
-- `query_history` meta-tool cannot rely on system-prompt advice alone for `last_n` bounds. The prompt asks the LLM to keep it small, but a misbehaving (or just curious) LLM can call `query_history()` with no args and force the entire move log back into context — defeating the whole point of compaction. Server-side backstop in `_execute_tool_call`'s handler: default to `QUERY_HISTORY_DEFAULT_LAST_N=50` when omitted/invalid (non-int, ≤ 0), clamp to `QUERY_HISTORY_MAX_LAST_N=1000` otherwise. Keep the cap in the handler, NOT in `MoveLog.read()`, so internal callers like `_hydrate_from_move_log()` stay uncapped (hydration legitimately needs every `phase_advance` to count the phase index correctly).
-- Session-recovery hydration must be phase-granular, not turn-granular. Faithfully replaying `tool_use` / `tool_result` blocks into `_global_history` requires preserving the exact `tool_use_id` strings the LLM generated — Anthropic API 400s on any mismatch, and the move log doesn't store ids. The robust path: count `phase_advance` entries → `_phase_idx`, inject one `[compacted] <wrap-up>` summary per completed phase, NEVER replay mid-phase tool detail. Mid-phase work is recovered via (a) scene-is-memory (the agent re-queries Blender on next turn) and (b) `query_history` (past decisions stay on disk). The cost is that a mid-phase crash loses the partial work's chat context — but ModPilot's design already treats Blender's saved state as the source of truth, so this is in-policy.
-- Frontend `session.ts` mints a fresh 12-char hex on every page reload by default — backend session recovery is useless without persistence. Flip to `localStorage` (key `modpilot.session_id.v1`), validate the stored value against `/^[a-f0-9]{12}$/i` before trusting it (defends against manual tampering / future format migrations), and fall back to module-scope cache when `localStorage.getItem`/`setItem` throws (Safari private mode, locked-down WebViews). Without the localStorage flip, the entire `moves.jsonl` recovery pipeline is dead code in production: same browser, same backend, fresh session_id every reload → backend always creates a new AgentLoop → prior session orphaned on disk.
-- LLM provider/model mismatch is a silent 404, not a startup error: `~/.modpilot/config.json` is allowed to persist any combination of `llm_provider` + `llm_model`, the `LLMClient.from_settings()` factory constructs the provider object successfully (no model-existence check), and the failure only surfaces when an actual chat round-trip hits the provider's `/api/chat` endpoint with an unknown model id. Symptom in this session: `POST /agent/messages → 500` with `httpx.HTTPStatusError: 404 Not Found for 'https://ollama.com/api/chat'` because the persisted config carried `provider=ollama` + `model=deepseek-chat` (the `deepseek-chat` model lives on api.deepseek.com via OpenAI-compatible, NOT on Ollama Cloud). Root cause was the `/config` UI dropdown: when the user switched Provider from openai_compatible to ollama, the Model field stayed at `deepseek-chat` — nothing reset it. Fix shipped in commit `481cd9d` covers both sides: (a) server guardrail `_validate_provider_model_combo()` in `POST /app/config` returns 422 + `field_errors.llm_model` for obvious mismatches (ollama + `deepseek-chat`/`claude-*`/`gpt-*`; anthropic + non-claude); openai_compatible stays open-universe since you can't enumerate every Qwen/GLM/Mistral variant. (b) UI `PROVIDER_DEFAULTS` map in `ConfigPage.tsx` — switching the Provider dropdown swaps Model + Base URL to the new provider's known-good defaults, but ONLY if the current values match a recognized default (so a manually-typed `qwen-max` isn't clobbered when switching openai_compatible → openai_compatible). ConfigPage also unwraps `ApiError.body.detail.field_errors[0]` for the user-facing message instead of "POST failed: 422". Diagnostic order when you see `/agent/messages` 500 in the future: (1) `GET /app/config` to inspect persisted `(provider, model, base_url)`; (2) `Get-Content $env:LOCALAPPDATA\com.modpilot.app\logs\backend.log -Tail 30` for the httpx URL + status — provider mismatch shows up as a 404 against the wrong host before any LLM-internal error.
-- For Tauri 2 release builds, always use `pnpm tauri build` (or `--no-bundle` variant for just the exe), NEVER raw `cargo build --release` → cargo alone compiles with `--cfg dev` set (visible in `cargo build --release -v` rustc invocation line), which makes Tauri's asset handler read from `devUrl` (Vite at :5173) instead of using the embedded bundle. modpilot.exe then spawns, opens its window with default title "ModPilot", and the WebView2 webview navigates to `http://tauri.localhost/index.html`, gets a 404 from an empty asset handler, falls back to `chrome-error://chromewebdata` (DevTools console shows `Not allowed to load local resource: chrome-error://chromewebdata/#buttons`). Backend sidecar starts fine, Rust shell logs all green, the only thing missing is the JS bundle itself. Diagnostic: grep the built exe for the current JS bundle filename (e.g. `Select-String index-XXXXXXXX` in PowerShell); zero matches = bundle not embedded; ~8.5 MB exe size also indicates dev mode (production with bundle is ~9.2+ MB). Today we lost ~2 hours chasing port conflicts, system proxy interference, WebView2 user-data corruption, and Tauri 2 capability/CSP theories before noticing `--cfg dev` in the verbose build output. Build invariant for ModPilot: never run `cargo build` against `src-tauri/` directly except for syntax checks; always go through `pnpm tauri build`.
-- Tauri v2 on Windows spawns its main window at (-21333, -21333) size 158×26 (offscreen, message-only sentinel) if you don't explicitly request centering → set `"center": true` on the window entry in `tauri.conf.json`. The `visible: false` + JS `getCurrentWindow().show()` trick is unnecessary; `center` alone fixes it. Verified via Win32 EnumWindows that without center you get TWO windows (Tao event-target + the real "Tauri Window"); with center, the real window spawns at correct size.
-- Browser sandboxes intentionally hide filesystem paths on drag-and-drop — the dropped `File` object has `.name` but **no `.path`**. So drag-drop-to-fill-path is impossible in the dev server (`:5173`) and you need a Tauri shell (or a system file picker via `tauri-plugin-dialog`) to surface real disk paths. PathField transparently degrades to a plain text input when `__TAURI_INTERNALS__` is not on `window`.
-- Issue #15 phase-transition pause: when adding a NEW wrap-up branch to `_run_react_turn`, the issue #14 interrupt check MUST run first — otherwise the interrupted user pays for an extra wrap-up `llm.chat` round-trip before the bail-out fires. Order: drain → error_reply guard → `_interrupted` guard → `state != RUNNING_PHASE or _phase_just_advanced` wrap-up. Also: tool *names* differ from class names — `SetupValidateScene` registers as `"setup_validate_scene"` (not `"setup_validate"`), `InferModelType` as `"setup_infer_model_type"` (not `"setup_infer"`). When mocking tool_calls in tests, grep `def name(self)` on the phase module — guessing from the `_PHASE_SEQUENCE` slot name (which IS truncated, e.g. `setup_validate`) makes the test silently hit the "Tool not available" path and the phase never advances.
-- Issue #14 interrupt mechanism: bail point MUST be at the top of the `_run_react_turn` for-loop (i.e. *between* rounds) and inside the per-tool-call inner break — NEVER between `history.append(assistant tool_use msg)` and the matching `history.append(user tool_result msg)`. The Anthropic API rejects unmatched `tool_use` blocks with HTTP 400. The existing try/finally placeholder injector (the "Skipped — preceding tool call failed" branch) covers the inner-loop break path so partial drains stay balanced. Reset the flag on bail-out — a sticky flag silently swallows the user's NEXT message. Also: on the JS side, ignore Escape when the focus is inside an `INPUT`/`TEXTAREA`/`SELECT` (otherwise Esc-to-blur kills the agent) and skip the POST when status isn't `thinking` (no in-flight phase to interrupt).
-- Phase 1 scale-align method changed in issue #13: was mesh-bbox-Z-max ratio, is now arm-bone average-Z ratio (upperarm/forearm/hand × L/R). The bbox method silently failed on rigs with anything sticking above the head (hats, weapons, hair flying up). Note that this also means the existing test_phases.py PoseCorrection class needs an autouse fixture to stub `_resolve_arm_candidates` — otherwise `discover_preset_dir` triggers an extra `execute_and_extract` call on the mock client and inflates `call_count` past existing assertions (3 → 4 for MMD/Endfield paths). Pattern: when a phase tool starts doing a side-channel Blender query, audit `call_count`-based assertions in its test file. The check itself isn't broken, but it becomes a coupling that propagates.
-- `PresetSupplementWrite` always writes `<base>_extended.json` — if the user (or LLM) passes `base_preset_name="VRChat_extended"`, the result is `VRChat_extended_extended.json`. Functionally correct (merges fine, registers via `add_x_preset`) but the chain of `_extended` suffixes is ugly when the LLM re-supplements a preset it just wrote. Verified on the Eku VRChat avatar run: turn 1 produced `VRChat_extended` @ 83.33%, turn 2 then produced `VRChat_extended_extended` @ 98.15%. Polish path (post-MVP): when the base already ends with `_extended`, mutate it in place instead of generating a deeper suffix.
-- DS's chat reply is not authoritative about coverage — on the Eku run, DS announced "总槽位数：54/54（100% 覆盖）" but the file it actually wrote was 53/54 (98.15%); it forgot to deduct the unmappable `spine_03` slot. Don't trust the LLM's natural-language summary of tool results — re-run `InferModelType` (or read the diff returned by the write tool) to get ground truth.
-- Unity Humanoid spec calls the pinky finger **`Little`**, not `pinky`. When scanning a humanoid rig for finger bones, grep both `little` AND `pinky` (and don't forget `Little Proximal.{L,R}` with a space if the rig uses the literal spec names — see Eku). VRChat preset's `pinky_*_L/R` slots already include `LittleProximal_L` / `Little1_L` etc. as candidates, but the dot-separator variant (`Little Proximal.L`) only matches after a supplement.
-- DS reasoning-mode (`deepseek-v4-flash`) turn latency is **~3 min per turn** when the system prompt carries the full `agent_workflow.md` + 20+ tool schemas. Most of that time is internal CoT before any visible content streams. Acceptable for automation; painful for chat UX. `OllamaProvider` currently doesn't expose Ollama's `think: False` request-body field — adding it would short-circuit reasoning when the user wants snappier replies (issue for the backlog).
-- `curl --data` with UTF-8 Chinese on Windows Git Bash mangles the body (cp1252 round-trip), and FastAPI then 422s with `"There was an error parsing the body"`. Use `curl --data-binary @file.json`, or drive the API from Python `httpx` (which encodes UTF-8 natively). This bit on the very first POST of the Eku DS-as-agent probe.
-- Phase-tool param-name drift between schema and runtime is invisible from outside the agent loop: e.g. `MaterialInspect`/`MaterialSetup` take `target_object` (not `mesh_object`), `MaterialGenerate` takes `mesh_collection` + `preset_mapping` (not `mesh_object` + `material_presets`), `PhysicsChains` takes `inferred_types` (not `chain_classifications`). The LLM-driven path normally hides this because the prompt+schema flow ensures names match. When writing direct-call harnesses like `verify_mvp.py`, grep `tool_schema` for each phase you call and use the exact key names — don't mirror what the agent loop appears to do, mirror what the JSON schema declares.
-- `PhaseError` is a `@dataclass`, not an `Exception` subclass → `raise PhaseError(...)` inside a phase tool's helper triggers `TypeError: catching classes that do not inherit from BaseException`. Helpers that may fail must return `(value, error)` tuples instead of raising. Pattern used in `app/phases/infer_model_type.py:_read_armature_bones`.
-- Modding-Toolkit ships **13** X-presets (not 14) in `assets/presets/import/`: `街霸6.json` lives in that folder but declares `preset_info.type="Y_PRESET"`. The X-preset enumeration must filter by `preset_info.type == "X_PRESET"`, not by folder location. Mirror the filter in `SHIPPED_X_PRESETS` so the boot fallback matches the live count.
-- Standard X-preset slot list is **51 keys**, not 58. The "58 standard bone slots" figure in `plugin_api.md` refers to Modding-Toolkit's preset *editor* scaffolding (`modder.init_editor`'s populated slots), not what shipped presets actually fill. For issue #6 / `PresetCustomWrite`, document the 51-slot list in `agent_workflow.md` so the LLM knows what to map.
-- blender-mcp `get_viewport_screenshot` writes the PNG to a filepath we supply on disk (NOT a base64 blob in the response) and reports failures as `status="success"` + `result["error"]` rather than top-level `status="error"` (the addon catches its own exceptions before returning) → Wrapper picks a `tempfile.NamedTemporaryFile(delete=False)` path, sends it as `filepath`, reads bytes back, deletes the temp, and inspects `result.get("error")` itself to raise `BlenderError`. Don't trust top-level status alone for this handler.
-- Ollama Cloud's `POST /api/chat` is NOT OpenAI-compatible (response is `body.message.content`, not `choices[0].message.content`) so `OpenAIProvider` 200s the request then explodes on parse. Wire format check: if a provider returns `done` / `done_reason` / `eval_count` you're talking Ollama, write a dedicated `OllamaProvider` against `httpx`. Tool-call ids are NOT returned — synthesize client-side uuids so the agent loop can pair `tool_use ↔ tool_result` across turns.
-- Reasoning-mode Ollama models (e.g. `deepseek-v4-flash`) burn token budget on internal CoT before emitting visible content. With `num_predict=32` the response was `content=""` + `stop_reason=max_tokens`; the default 4096 budget works fine. If you want zero-reasoning behavior, pass `think: False` in the request body — currently not exposed in `OllamaProvider`.
-- `Path.home()` is a classmethod on pathlib.Path, NOT an instance method — patch it with `monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))`, NOT `lambda self: ...` (issue #9 tests). Wrong patch silently leaks to the real `~` and tests poison the developer's `~/.modpilot/config.json`.
-- Pydantic v2 dynamic field names: `BaseModel` with `model_config = ConfigDict(extra="allow")` exposes them via `model.model_extra` (NOT in `model_dump()` by default). Use this to accept form-submissions with unknown-ahead-of-time keys like `type__<chain_name>` or `texmap__<slot_idx>__<mat>` (issue #7's widget routes). Iterate `model_extra.items()` to harvest.
-- CSS `display:none` on an ancestor wins over `display:flex` on a descendant, even if the descendant's selector specificity is higher — the descendant's box is never generated at all. Symptom (issue #3): `#config-saved-badge` was nested inside `#config-form-section`, and `body.config-locked #config-form-section { display: none }` made the whole subtree invisible, including the badge that was supposed to appear in the section's place → Either keep them as siblings, or (cleaner here) hide only the form's inner children when locked and leave the section itself in the DOM so the badge stays renderable.
-- TestClient + `sse-starlette` long-lived stream don't compose: `client.stream(...).iter_text()` and even just entering/exiting `with client.stream(...)` block can hang forever waiting for body drain → Verify SSE wire format via manual `curl -N --max-time N` against a running uvicorn, not via TestClient. In unit tests, inspect `app.state.agent_streams[sid]` queue contents directly.
-- Event sink ordering bug: `call_soon_threadsafe`-scheduled emits land in the queue AFTER any synchronous `put_nowait` even when both are issued from the loop thread → "Smart sink": if `asyncio.get_running_loop() is event_loop`, push directly; otherwise threadsafe-marshal. Otherwise the final `done` event arrives before earlier `message(assistant)`.
-- `LLMClient.from_settings()` runs in FastAPI lifespan. Without `LLM_API_KEY` in env / .env, the openai client constructor raises `OpenAIError: Missing credentials` at server boot → For smoke tests that don't need real LLM calls: `LLM_API_KEY=dummy LLM_BASE_URL=http://127.0.0.1:9999 uv run uvicorn ...`.
-- `_get_or_create_session` calls `_get_client()` which raises 503 when Blender unreachable, BEFORE reaching `loop.step()` → SSE event payloads can't be smoke-tested via curl without a live Blender connection. Use unit tests with `BlenderClient.connect` / `connected` monkey-patched for event-sequence assertions.
-- `cli.py` and the web UI share `app.state.agent_sessions` keyed by session_id. CLI sessions never install an event sink; web UI sessions do. Sharing a session_id across both means the second client picks up existing `AgentLoop` state but only sees events for turns triggered through `/agent/messages` → Don't reuse session_ids across the two surfaces unless that sharing is desired.
+<!-- ONE trimmed bullet per fix: what went wrong / what's non-obvious + the known fix.
+     ≤3 lines, ≤300 chars, stable #NN, newest at top. Depth → docs/dev/lessons-detail.md by ID.
+     A PreToolUse hook gates this format on every Edit/Write. -->
+
+- **#56** Blender 4 renamed Principled 'Emission' to 'Emission Color' and defaults Emission Strength to 0, which the Toolkit's generator reads as not emissive: material_setup skipped every emission map. Look slots up by alias; turn a zero strength on.
+- **#55** RE Chain Editor has no 'RE_CHAIN_CHAINNODE' type, node `parent_bone` or group `chainSetting`; SHARED mode and collider_create used them and got nothing back (every chain the first type, every head ''). Head = first RE_CHAIN_NODE child's BoneName; settings = parent.
+- **#54** Hips poke through a hanging skirt's back: Dimi pre-rotates the limit CONES of the back/side strands 13° (frame rotation = angleLimitDirection) and cone-limits their top joints (15/30/45/60). Only front strands get Free tops. Sampling 2 front strands to copy all 12 broke it.
+- **#53** Sleeves hit the sailor collar: pre-rotate the collar's side strips outward (~6° about their top joint) with mesh AND bones together. Dimi tilted only the mesh, so physics never got the room and his bones sat 6.7 cm below the cloth.
+- **#52** Legs pierce a simulated skirt front. Dimi's fix needs no colliders: leave the front strands (F, 1, 2) unweighted and skin that cloth to L/R_Thigh + Hip_HJ_00, with physics only on the sides and back. ModPilot weights every strand to its chain.
+- **#51** Back collar misbehaved in game: physics_chains starts a flap chain at its root bone (C_Cloak), so the next joint simulates, and full_body.clsp's Spine_2 capsule (r 0.13) held the flap's joints 1-12 mm deep at rest. Start at `.005`, shrink to 0.094; check rest clearance.
+- **#50** CORRECTED: a clspFlags mask indexes the part's OWN clsp. BHS's 8634368 has bit 23 inert (no such capsule there); ours is full_body.clsp's 0.2 m hip capsule, which held 41/53 skirt joints inside at rest. Never copy masks; match the colliders hit (thighs r 0.08).
+- **#49** physics_transplant (smart_graft) adds `<leaf>_End` only for leaves weighted in meshes still on the SOURCE rig; vertex_groups already moved them, so a rig without `_end` bones got none and auto_create_chains skipped all 34 one-bone chains. Add the `_End`s first.
+- **#48** vertex_groups' join keeps ONE value per shape key (the active object's): the BHS FBX lost shoes `High heeled`=1 (soles 4.3 cm into the floor) and `Big breasts` 0.5. Bake each object's own mix before joining, or rebuild per vertex after.
+- **#47** collider_create bound full_body.clsp to the ACTIVE object; after 4B the avatar + MHWs armatures exist, so re_clsp.importfile cancelled ("More than one armature"). Now binds `target_armature` (default MHWs). batch_export still never binds clsp, so the colliders don't reach the mod.
+- **#46** Blender 5 moved pose-mode selection to `PoseBone.select`; `Bone.select` is gone, so `pb.bone.select = True` killed physics_chains (merge/clear). Use `pb.select` if `hasattr(pb,'select')` else `pb.bone.select`. Found by tools-5.2 L3 replay.
+- **#45** `uv run pytest` dies here with "uv trampoline failed to canonicalize script path"; `uv run python -m pytest` works. A test that seeds X_PRESETS before `TestClient(app)` is silently overwritten by the lifespan fallback — seed inside the `with`.
+- **#44** `getattr(bpy.ops.ns, 'op', None)` is never None: bpy.ops returns a stub for ANY name and only the call fails ("could not be found"). Check `'op' in dir(bpy.ops.ns)`. ModPilot's old MISSING_OP branch was dead code because of this.
+- **#43** Blender 5.x breaks scripted ops in two ways: `object.select_grouped` needs a 3D View (headless and MCP timer contexts fail), and GN modifier `mod["Socket_N"]` is gone (use `mod.properties.inputs.Socket_N.value`). Hits MBT T-pose + RE Chain Editor. (→detail)
+- **#42** Modding-Toolkit 2.8.5 renamed presets to ASCII stems (怪猎荒野→`mhws`, 终末地→`arknights`) and `tpose_direction`→`mmd_a_to_tpose`. Enum values are FILE names, so stale literals TypeError at runtime. tools-5.2 L0 checks both in live Blender.
+- **#41** MDF flag bits are adjacent: killing alpha-test by ASSIGNING 134217880 also cleared `BaseTwoSideEnable`. Real defect (both working mods use 134217883 on cloth) and fixed to ...881 — but it did NOT restore the skirt, so wrong culprit. Flip single bits, never assign whole ints. (→detail)
+- **#40** fbxskel family-clustering fooled us: ModPilot fits avatar→template rig, so near-vanilla fbxskel is CORRECT here (RigForge re-proportions skeleton→avatar — donor/BHS deviate hugely). In-game: fine overall, legs slightly off (L_Shin flip, minor). Don't cross-judge strategies. (→detail)
+- **#39** MHWs armor physics kit: working mods kill vanilla physics on ALL 5 parts (16B empty CLSP + 128B chain2 stubs); model part ships real chain2(+clsp). Engine reads chain2 .13 AND .14 (.14 shadows); Aug-4 TU re-exported only touched assets. defAttr 0x100A0 is vanilla-normal. (→detail)
+- **#38** VRChat-avatar MDF pitfalls: cloth ALBD alpha = outfit TOGGLES → BaseAlphaTestEnable OFF on cloth (else skirt vanishes) but ON for hair (strand cutout); the deprecated hair master's defaults render white hair dark — put anime hair on Base_Equip with a color+alpha ALBD. (→detail)
+- **#37** CORRECTED 2026-10-11: `create_full_body_clsp` was never an RE Chain Editor op — only the uninstalled MHWilds_Chain_Editor fork had it. Phase 4C now imports bundled full_body.clsp.3 via `re_clsp.importfile`. Flags-only fallback still BROKEN (#39).
+- **#36** `batch_export` binds ONE collection to every target part → N identical full copies stacked in-game. Real mods ship the model in one part + generic 3.5KB stub mesh / 6KB stub mdf2 in the rest (byte-identical across slots, cloneable); drop stub-part chain2 or physics instantiates N×.
+- **#35** MHWs tex-pak need is DISPUTED: kevin's post-Aug-4 belief said textures load only from a `.pak`; Dimi says separate tex paks are no longer needed (2026-08-06). Ship BOTH loose tex + `X_tex.pak` until in-game proof; pack/verify via ree-pak-cli. (→detail)
+- **#34** `mhws.auto_create_chains` fails headless (`Collection not found:`) — its chainCollection fallback lives in `invoke()`, which scripted `bpy.ops` skips; the toolkit is also double-installed, so patching one class misses. (→detail)
+- **#33** DeepSeek locks into refusal after one tool failure plus a phase-slot rejection, and generic "继续" reinforces it. Break it with one action per message naming the exact tool + args and its real slot. (→detail)
+- **#32** `vision_available()` caches its resolved bool on first call → mutating `settings.vision_model` in a test is invisible until `refresh_vision_cache()` runs. Reset it in `finally` or the next test is poisoned. (→detail)
+- **#31** SUPERSEDED (#20/PR6 deleted compaction): it needed TWO flags because the wrap-up had to land in history before compaction read it. `_phase_just_advanced` survives as the issue #15 pause rail. (→detail)
+- **#30** `query_history` needs a server-side `last_n` backstop (default 50, cap 1000) in the tool handler, else the LLM can pull the whole move log back into context. Not in `MoveLog.read()` — hydration needs it uncapped. (→detail)
+- **#29** Session recovery is phase-granular: never replay `tool_use`/`tool_result` blocks (the move log stores no `tool_use_id`, and Anthropic 400s on mismatch). Count `phase_advance` entries → `_phase_idx`. (→detail)
+- **#28** FE `session.ts` mints a new session_id on every page reload → the whole `moves.jsonl` recovery pipeline is dead code in production. Persist to `localStorage` and validate the format before trusting it. (→detail)
+- **#27** Provider/model mismatch is a silent 404 at first chat, not a boot error — `from_settings()` never checks the model exists. Guardrail in `POST /app/config` + `PROVIDER_DEFAULTS` on the UI dropdown. (→detail)
+- **#26** Tauri 2 release: always `pnpm tauri build`, never raw `cargo build --release` — cargo sets `--cfg dev`, so the asset handler reads devUrl and the window lands on `chrome-error://`. (→detail)
+- **#25** Tauri v2 on Windows spawns its main window offscreen at (-21333,-21333) 158×26 unless you set `"center": true` in `tauri.conf.json`. The `visible:false` + JS `show()` trick is unnecessary.
+- **#24** Browser sandboxes strip filesystem paths from drag-drop — the `File` object has `.name`, no `.path`. Real paths need the Tauri shell (or `tauri-plugin-dialog`); PathField degrades to a text input.
+- **#23** The issue #15 wrap-up branch must run AFTER the #14 interrupt guard, else an interrupted user pays for an extra `llm.chat`. Tool names ≠ class names (`SetupValidateScene` → `setup_validate_scene`). (→detail)
+- **#22** Interrupt bail-out must sit between ReAct rounds or inside the per-tool-call break — never between an assistant `tool_use` append and its `tool_result` (Anthropic 400s). Reset the flag on bail. (→detail)
+- **#21** Phase 1 scale-align uses arm-bone average-Z (issue #13), not mesh-bbox-Z — bbox broke on hats/weapons/flying hair. Side-channel Blender queries then break `call_count` assertions in test_phases.py. (→detail)
+- **#20** `PresetSupplementWrite` always appends `_extended`, so re-supplementing yields `VRChat_extended_extended.json`. Works, but ugly; polish = mutate in place when the base already ends in `_extended`. (→detail)
+- **#19** Don't trust DS's natural-language summary of a tool result: it announced "54/54 (100%)" while the file it wrote was 53/54 — it forgot the unmappable `spine_03`. Re-run the tool or read the returned diff.
+- **#18** Unity Humanoid calls the pinky `Little` — grep both when scanning a rig, plus the space-separated spec form `Little Proximal.{L,R}`, which only matches after a preset supplement.
+- **#17** DS reasoning-mode (`deepseek-v4-flash`) costs ~3 min/turn with the full workflow + 20 tool schemas, mostly internal CoT. Ollama's `think: False` would short-circuit it, but `OllamaProvider` doesn't expose it.
+- **#16** `curl --data` with UTF-8 Chinese on Git Bash mangles the body (cp1252 round-trip) and FastAPI 422s. Use `curl --data-binary @file.json`, or drive the API from Python `httpx`.
+- **#15** Phase-tool param names drift from what the loop appears to pass (`MaterialInspect` takes `target_object`, `PhysicsChains` takes `inferred_types`). For direct-call harnesses, mirror `tool_schema`. (→detail)
+- **#14** `PhaseError` is a `@dataclass`, not an `Exception` → `raise PhaseError(...)` gives `TypeError: catching classes that do not inherit from BaseException`. Helpers must return `(value, error)` tuples.
+- **#13** Modding-Toolkit ships 13 X-presets, not 14: `街霸6.json` sits in `assets/presets/import/` but declares `type="Y_PRESET"`. Filter on `preset_info.type`, not folder location.
+- **#12** The standard X-preset slot list is 51 keys, not the 58 quoted in plugin_api.md — that figure is `modder.init_editor`'s editor scaffolding, not what shipped presets actually fill.
+- **#11** blender-mcp `get_viewport_screenshot` writes a PNG to a path you supply and reports failure as `status="success"` + `result["error"]`. Don't trust top-level status for this handler. (→detail)
+- **#10** Ollama Cloud `/api/chat` is NOT OpenAI-compatible (`body.message.content`); `OpenAIProvider` 200s then dies on parse. Tell: `done`/`eval_count` in the body. Tool-call ids must be synthesized. (→detail)
+- **#9** Reasoning Ollama models spend the token budget on CoT before any visible content — `num_predict=32` returned `content=""` + `stop_reason=max_tokens`. The default 4096 is fine.
+- **#8** `Path.home()` is a classmethod — patch it with `classmethod(lambda cls: tmp_path)`, not `lambda self:`. The wrong patch leaks to the real `~` and poisons `~/.modpilot/config.json`.
+- **#7** Pydantic v2 `extra="allow"` fields land in `model.model_extra`, not `model_dump()` — that's how the widget routes harvest unknown-ahead-of-time keys like `texmap__<slot>__<mat>`.
+- **#6** CSS `display:none` on an ancestor beats `display:flex` on a descendant regardless of specificity — the box is never generated. Bit the config-saved badge nested inside the hidden form section.
+- **#5** TestClient + `sse-starlette` hang forever on a long-lived stream, even just entering/exiting the `with` block. Verify SSE via `curl -N --max-time N`; in unit tests read the queue directly. (→detail)
+- **#4** `call_soon_threadsafe` emits land AFTER a synchronous `put_nowait` even from the loop thread → `done` arrives before earlier messages. Smart sink: push directly when already on the event loop.
+- **#3** `LLMClient.from_settings()` runs in the FastAPI lifespan, so a missing `LLM_API_KEY` kills server boot. Smoke tests: `LLM_API_KEY=dummy LLM_BASE_URL=http://127.0.0.1:9999`.
+- **#2** `_get_or_create_session` calls `_get_client()`, which 503s when Blender is unreachable, before `loop.step()` — so SSE payloads can't be curl-tested without live Blender. Monkeypatch in unit tests.
+- **#1** `cli.py` and the web UI share `app.state.agent_sessions` by session_id, but only web sessions install an event sink — reusing an id across both means the CLI's turns emit no events.

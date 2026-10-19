@@ -36,12 +36,12 @@ A three-step deterministic pipeline applied before skeleton alignment (Phase 2):
     the phase still reports success on the Z scale outcome.
 
   Step 3 — Deterministic pose conversion  (driven by x_preset, no LLM needed)
-    MMD    → modder.tpose_direction
-    VRChat → skip (already in T-pose)
-    终末地 → modder.apply_transform_forward(transform_name="终末地")
+    MMD       → modder.mmd_a_to_tpose (Toolkit 2.8.5; was modder.tpose_direction)
+    VRChat    → skip (already in T-pose)
+    arknights → modder.apply_transform_forward with the Endfield A-to-T pose record
 
 Required params:
-  x_preset         : str   — "MMD" | "VRChat" | "终末地"
+  x_preset         : str   — "MMD" | "VRChat" | "arknights" (Endfield)
   source_armature  : str   — Blender ARMATURE object name (source model)
   target_armature  : str   — Blender ARMATURE object name (MHWs reference skeleton)
 
@@ -91,7 +91,7 @@ def _resolve_arm_candidates(
     "Left arm" / "腕.L"); we pull the `main` candidate list from the preset's
     mappings so the scale-align code blob can try each in order. Slots not
     present in the preset fall back to the slot key itself — covers minimal
-    custom presets or 怪猎荒野 (canonical-naming) rigs.
+    custom presets or mhws (canonical-naming) rigs.
 
     Catalog lookup is cached for app lifetime; tests can monkeypatch this
     function directly or clear `_ARM_CANDIDATE_CACHE`.
@@ -117,9 +117,12 @@ def _resolve_arm_candidates(
 
 _OP_RESET = "pose.transforms_clear"
 _OP_APPLY_SCALE = "object.transform_apply"
-_OP_TPOSE_DIRECTION = "modder.tpose_direction"
+_OP_MMD_A_TO_TPOSE = "modder.mmd_a_to_tpose"
 _OP_APPLY_FORWARD = "modder.apply_transform_forward"
-_ENDFIELD_TRANSFORM = "终末地"
+# Pose-record file stem (assets/presets/pose/). Toolkit never shipped a plain
+# "终末地.json" pose record; the Endfield records are "终末地 A转Tpose" and
+# "终末地 A转冰原Tpose" (the latter targets the MHWI T-pose).
+_ENDFIELD_TRANSFORM = "终末地 A转Tpose"
 
 
 class PoseCorrection(PhaseTool):
@@ -148,7 +151,7 @@ class PoseCorrection(PhaseTool):
                 "properties": {
                     "x_preset": {
                         "type": "string",
-                        "enum": ["MMD", "VRChat", "终末地"],
+                        "enum": ["MMD", "VRChat", "arknights"],
                         "description": "Source model type.",
                     },
                     "source_armature": {
@@ -167,7 +170,7 @@ class PoseCorrection(PhaseTool):
                         "type": "string",
                         "description": (
                             "Target game preset for arm-bone name lookup. "
-                            "Default: 怪猎荒野 (MHWs). Change only for non-MHWs targets."
+                            "Default: mhws (MHWs). Change only for non-MHWs targets."
                         ),
                     },
                     "skip_scale_align": {
@@ -197,7 +200,7 @@ class PoseCorrection(PhaseTool):
                     category="precondition",
                     operator="",
                     message=f"Unknown X preset {x_preset!r}. Valid: {sorted(X_PRESETS)}",
-                    suggestion="Choose from MMD, VRChat, or 终末地.",
+                    suggestion="Choose from MMD, VRChat, or arknights.",
                 )
             )
 
@@ -233,7 +236,7 @@ class PoseCorrection(PhaseTool):
                     category="precondition",
                     operator="",
                     message=f"Unknown Y preset {y_preset!r}. Valid: {sorted(Y_PRESETS)}",
-                    suggestion="Use 怪猎荒野 for MHWs.",
+                    suggestion="Use mhws for MHWs.",
                 )
             )
 
@@ -338,8 +341,8 @@ class PoseCorrection(PhaseTool):
         scale on the source armature (with transform_apply to bake).
 
         Bone names for both sides come from the preset system:
-          source ← X-preset (MMD / VRChat / 终末地)
-          target ← Y-preset (怪猎荒野 for MHWs)
+          source ← X-preset (MMD / VRChat / arknights)
+          target ← Y-preset (mhws for MHWs)
         Each preset maps slot keys to the actual bone names in its rig.
         """
         src_candidates = _resolve_arm_candidates(client, x_preset)
@@ -481,14 +484,14 @@ class PoseCorrection(PhaseTool):
         Apply preset-specific pose conversion.
 
         VRChat : no-op (already T-pose).
-        MMD    : modder.tpose_direction (rotates upper arms to T-pose).
-        终末地 : modder.apply_transform_forward with transform_name="终末地".
+        MMD       : modder.mmd_a_to_tpose (rotates upper arms to T-pose).
+        arknights : modder.apply_transform_forward with the Endfield pose record.
         """
         if x_preset == "VRChat":
             return None  # T-pose by convention; no operator needed
 
         if x_preset == "MMD":
-            op = _OP_TPOSE_DIRECTION
+            op = _OP_MMD_A_TO_TPOSE
             code = (
                 f"import bpy\n"
                 f"bpy.context.scene.mhw_suite_settings.pose_import_preset_enum = {(x_preset + '.json')!r}\n"
@@ -503,7 +506,7 @@ class PoseCorrection(PhaseTool):
                 f"    print({BLENDER_SENTINEL!r})\n"
                 f"    print(ret)\n"
             )
-        else:  # 终末地
+        else:  # arknights (Endfield)
             op = _OP_APPLY_FORWARD
             code = (
                 f"import bpy\n"

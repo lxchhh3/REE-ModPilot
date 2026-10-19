@@ -20,6 +20,8 @@
     "l_shin":     { "bit": 65536,   "label": "L Shin->Foot" },
     "r_shin":     { "bit": 131072,  "label": "R Shin->Foot" },
     "l_foot":     { "bit": 262144,  "label": "L Foot->Toe" },
-    "r_foot":     { "bit": 524288,  "label": "R Foot->Toe" }
+    "r_foot":     { "bit": 524288,  "label": "R Foot->Toe" },
+    "hip_wide":   { "bit": 8388608, "label": "Hip, wide (0.2 m sphere)",
+                    "note": "A second, much larger sphere on the hip (full_body.clsp.3 entry 0). A skirt's joints start inside it: claude_run1 held 41 of 53 skirt joints in it at rest. Skirts collide with the thighs instead." }
   }
 }

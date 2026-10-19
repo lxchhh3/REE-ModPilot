@@ -41,7 +41,7 @@ the user owns Monster Hunter Wilds and Blender separately.
    tab, click **Connect to Claude** to bind port `9876`.
 
 > The first four addons together expose the operator surface documented in
-> [plugin_api.md](plugin_api.md). Without them ModPilot cannot run.
+> [plugin_api.md](../dev/plugin_api.md). Without them ModPilot cannot run.
 
 ### Frontend (since 2026-05-18 — React + Tauri rebuild)
 
@@ -217,7 +217,7 @@ Most fields are self-explanatory. The non-obvious ones:
 
 `verify_mvp.py` is the **L2** signal (toolkit operators report success +
 output files exist with non-zero size). L3 acceptance per design
-[A4](design.md#a4-mvp-验收用例) requires the mod to actually load and
+[A4](../dev/design.md#a4-mvp-验收用例) requires the mod to actually load and
 render in Monster Hunter Wilds without crashing.
 
 ### Procedure

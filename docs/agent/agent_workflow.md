@@ -316,14 +316,14 @@ On success, report:
 
 > **Fixed names — do NOT ask the user:**
 > - `target_armature` for all phases = `"MHWilds_Female Armature"` (always, after setup)
-> - `y_preset` = `"怪猎荒野"` (always for MHWs MVP)
+> - `y_preset` = `"mhws"` (always for MHWs MVP; Modding-Toolkit 2.8.5 preset stem, display name 怪猎荒野)
 
 ### Preset Paths
 | Source Type | X Preset File | Skeleton Preset |
 |---|---|---|
 | MMD | `..\Modding-Toolkit\assets\presets\import\MMD.json` | MMD |
 | VRChat | `..\Modding-Toolkit\assets\presets\import\VRChat.json` | VRChat |
-| Endfield | `..\Modding-Toolkit\assets\presets\import\终末地.json` | Endfield |
+| Endfield | `..\Modding-Toolkit\assets\presets\import\arknights.json` | `arknights` |
 
 Y preset is always: MHWs (Monster Hunter Wilds).
 
@@ -343,7 +343,7 @@ mishe, kokoa, fiona, mint, lazuli, soraha, minahoshi, koyuki, cian, meiyun, meri
 velle, anon, ciel, sephira, lucifer
 ```
 
-If no keywords match, ask the user directly: "你的来源模型是哪种格式？MMD / VRChat / 终末地 / 其他？"
+If no keywords match, ask the user directly: "你的来源模型是哪种格式？MMD / VRChat / 终末地 (arknights) / 其他？"
 
 ---
 
@@ -838,35 +838,37 @@ either ignores collisions entirely or behaves erratically.
 
 ### Entry Conditions
 - [ ] Phase 4B completed — chain header / settings / groups exist in the chain collection.
-- [ ] Wilds Chain Editor add-on installed (provides `re_chain.create_full_body_clsp`).
+- [ ] RE Chain Editor add-on installed (provides `re_clsp.importfile`).
 
 ### Execution Steps
 
 **Step 1 — `collider_create` (sub-step, does NOT advance phase)**
 
-Calls `bpy.ops.re_chain.create_full_body_clsp()`. The operator imports the
-add-on's bundled `full_body.clsp.3` preset, creates one collider object per
-MHWilds body bone (Hip / Spine_0..2 / arms / legs / head), and attaches a
-CHILD_OF constraint to each so the colliders follow the bones during
-animation. Colliders are placed in a sibling `Chain Clsps - <name>.clsp`
-collection.
+Imports ModPilot's bundled `app/data/full_body.clsp.3` through RE Chain
+Editor's `bpy.ops.re_clsp.importfile(filepath=..., targetArmature=<active
+armature data>)`, so the MHWilds skeleton must be the active object. That
+creates the MHWilds body colliders (21 capsules, each a ROOT/START/END object
+triple; START/END are CHILD_OF-constrained to body bones such as Hip_HJ_00) so
+they follow the bones during animation. Measured in Blender 4.3.0: 63 objects,
+42 bone-bound, collection `full_body.clsp`.
 
 Returns `state_diff["collider_info"]`:
 ```json
 {
-  "colliders": [{"name": "...", "bone": "Spine_0", "type": "CAPSULE"}, ...],
+  "colliders": [{"name": "COL_00_CAPSULE_BEGIN Hip_HJ_00", "bone": "Hip_HJ_00",
+                 "type": "CAPSULE_START"}, ...],
   "chain_groups": [
     {"name": "CHAIN_GROUP_0", "parent_bone": "Hair_001",
      "clspFlags0": -1, "clspFlags1": 0},
     ...
   ],
-  "clsp_collection": "Chain Clsps - MHWilds_Female.clsp"
+  "clsp_collection": "full_body.clsp"
 }
 ```
 
 **If the operator is missing** (`MISSING_OP` precondition error): tell the
-user to install the Wilds Chain Editor add-on. Do NOT try to bundle our own
-collider preset — the add-on owns this surface.
+user to install and enable RE Chain Editor. The preset itself ships with
+ModPilot; only the importer comes from the add-on.
 
 **Step 2 — Propose flag masks (LLM in chat, no tool call)**
 
@@ -894,6 +896,7 @@ Bit layout (from `app/data/clsp_body_bits.json`):
 | 0x20000 | r_shin     | R Shin → Foot |
 | 0x40000 | l_foot     | L Foot → Toe |
 | 0x80000 | r_foot     | R Foot → Toe |
+| 0x800000 | hip_wide  | Hip, a second 0.2 m sphere. A skirt's joints start inside it (claude_run1: 41 of 53), so skirts use the thighs instead |
 
 Runtime collision test: `(chainGroup.clspFlags0 & collider.clspBitFlag0) != 0`.
 
@@ -929,7 +932,7 @@ Inputs: `{"chain_flags": {"CHAIN_GROUP_0": 0x0000E, "CHAIN_GROUP_1": {"clspFlags
 - User has confirmed the masks before Step 3 ran.
 
 ### Common Errors
-- `MISSING_OP:re_chain.create_full_body_clsp` — Wilds Chain Editor not installed.
+- `MISSING_OP:re_clsp.importfile` — RE Chain Editor not installed or disabled.
 - `CANCELLED:...` — operator failed; usually no active armature in pose mode
   or a naming collision with a pre-existing clsp collection.
 
@@ -1239,9 +1242,11 @@ Parameters:
 **Goal**: Export final mod files (mesh + mdf2 + chain2) to the Natives directory,
 then run BoneSystem export for the MHWs armature.
 
-> **clsp (collision) files**: not processed in this workflow. Use the "empty model"
-> option for all clsp slots — the exporter writes an empty placeholder automatically.
-> Do NOT select the clsp collection or attempt to generate clsp data.
+> **clsp (collision) files**: `batch_export` exports the colliders Phase 4C imported
+> (`full_body.clsp`) with the target parts by itself, so the masks `collider_apply`
+> wrote have colliders to hit in game. Leave `clsp_collection` out; pass it only when
+> `batch_export` reports several collider collections, and pass `""` for a blank clsp
+> (Phase 4C skipped). The other parts always get the empty placeholder.
 
 ### Entry Conditions
 - [ ] Phase 5 materials baked and MDF2 files written.
