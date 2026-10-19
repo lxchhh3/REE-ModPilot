@@ -20,6 +20,22 @@ All design items in [docs/dev/design.md](docs/dev/design.md) (A/B/C/D/E layers) 
 
 ---
 
+## Project Status: Paused (2026-05-25)
+
+The MVP works and was verified at L3 — mods exported through the full pipeline load and run in-game. Development stopped anyway, for an architectural reason worth stating plainly.
+
+**ModPilot is a workflow, not an agent.**
+
+The execution graph is a single line: phases 1→6, fixed order. The LLM's real authority is *classification within a phase* (which bones are physics bones, which texture maps to which slot) — not *deciding what to do next*. Starting mid-pipeline only means picking an insertion point on that same line and continuing downstream. At no point does the system look at the current scene, form its own judgement about what state it is in, and choose an action accordingly.
+
+Turning it into a real agent is not primarily a coding problem. Autonomous evaluation requires knowing **what an observation means** — "the mesh renders black in-game" → a ranked set of causes with the evidence behind each. That is domain knowledge, and for RE Engine model replacement it is largely unwritten: scattered across chat logs, tool source, and the heads of a handful of people.
+
+⇒ Work moved to building that knowledge layer as a separate project. It is not public yet; an open-source knowledge base is planned once the corpus is solid enough to stand on its own. ModPilot resumes when there is something to plug into it.
+
+**What is here is complete and runnable**: 16 phase tools, hand-rolled ReAct loop, provider-agnostic LLM client, React 19 + Tauri frontend, 526 unit tests / 70+ Playwright checks.
+
+---
+
 ## Vision
 
 For Blender-literate users who want to make RE Engine character mods but lack RE Engine modding experience: ModPilot is a **step-by-step AI guide + Blender automation layer** that compresses the mod-making pipeline (`docs/user/plan.md` videos 1-7) from hours to ≤ 1 hour.
