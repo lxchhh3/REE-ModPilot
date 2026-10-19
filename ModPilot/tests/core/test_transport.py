@@ -99,3 +99,60 @@ def test_execute_returns_plain_stdout():
     fake = FakeBridge([_ok("hello\n")])
     with BridgeTransport(port=fake.port) as t:
         assert t.execute("print('hello')") == "hello\n"
+
+
+# ---------------------------------------------------------------- Blender Lab MCP (port 9877)
+# Its add-on (tools-5.2 upstream/blender_mcp addon/blender_mcp_addon/mcp_to_blender_server.py)
+# takes {"type": "execute", "code", "strict_json"} + NUL and answers {"status": "ok", "result",
+# "stdout"} or {"status": "error", "message": <traceback text>, "stdout"}; code hands data back by
+# assigning `result`.
+
+from modpilot_host.transport import LabTransport, lab_call_code  # noqa: E402
+
+
+class FakeLab:
+    def __init__(self, response):
+        self.response = response
+        self.request = None
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        conn, _ = self.sock.accept()
+        with conn:
+            buf = b""
+            while not buf.endswith(b"\0"):
+                buf += conn.recv(65536)
+            self.request = json.loads(buf[:-1].decode("utf-8"))
+            conn.sendall(json.dumps(self.response).encode("utf-8") + b"\0")
+
+
+def test_the_lab_call_hands_the_report_back_as_result():
+    code = lab_call_code("doctor", {"require": []})
+    assert code.splitlines() == ["import modpilot", "result = modpilot.call('doctor', {'require': []})"]
+
+
+def test_a_lab_report_comes_back_from_result():
+    fake = FakeLab({"status": "ok", "result": REPORT, "stdout": "MODPILOT_REPORT=..."})
+    assert LabTransport(port=fake.port).call("doctor", {}) == REPORT
+    assert fake.request["type"] == "execute" and fake.request["strict_json"] is True
+    assert "result = modpilot.call('doctor'" in fake.request["code"]
+
+
+def test_a_lab_step_error_comes_back_as_the_same_step_error():
+    err = StepError("environment", "no operators registered under x", step="doctor", details={"missing": ["x"]})
+    tb = f'Traceback (most recent call last):\n  File "<string>", line 2\nmodpilot.core.errors.StepError: {err}\n'
+    fake = FakeLab({"status": "error", "message": tb, "stdout": str(err) + "\n"})
+    with pytest.raises(StepError) as e:
+        LabTransport(port=fake.port).call("doctor", {"require": ["x"]})
+    assert e.value.to_dict() == err.to_dict()
+
+
+def test_a_lab_error_without_a_step_error_is_a_bridge_error():
+    fake = FakeLab({"status": "error", "message": "Traceback ...\nModuleNotFoundError: No module named 'modpilot'\n"})
+    with pytest.raises(BridgeError) as e:
+        LabTransport(port=fake.port).call("doctor", {})
+    assert "No module named 'modpilot'" in str(e.value)

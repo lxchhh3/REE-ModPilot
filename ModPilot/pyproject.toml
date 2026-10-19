@@ -34,6 +34,7 @@ markers = [
     "unit: fast tests, no external services required",
     "integration: requires real Blender on port 9876",
     "blender: launches a headless Blender (tests/bl, tests/diff, tests/blender)",
+    "live: talks to kevin's running Blender 5.2 on 9876 / 9877 (opt-in: -m live)",
 ]
 testpaths = ["tests"]
 
