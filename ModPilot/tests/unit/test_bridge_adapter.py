@@ -60,6 +60,7 @@ def test_only_ported_names_are_replaced():
     assert wrapped["list_objects"].tool_schema() == ListObjects.tool_schema()
 
 
+@pytest.mark.bridged_catalog
 def test_the_legacy_catalog_is_still_reachable_for_differential_tests():
     from app.agent.phase_loop import build_full_tool_catalog, legacy_tool_catalog
     for name in _bridge.PORTED:
@@ -107,3 +108,11 @@ def test_a_bridge_failure_that_is_not_a_step_error_is_unexpected():
     c.execute.side_effect = BlenderError("No module named 'modpilot'")
     r = _bridge.BridgedPhaseTool(Legacy()).run(c, MagicMock(), {})
     assert not r.success and r.error.category == "unexpected" and "modpilot" in r.error.message
+
+
+def test_a_step_error_can_carry_the_legacy_category_the_agent_loop_keys_on():
+    # setup_infer_model_type's no-match failure: the legacy loop offers [Force Custom] on it
+    err = StepError("precondition", "No X-preset matched", step="legacy_x",
+                    details={"legacy_category": "unsupported_rig", "result": {"decision": "unsupported"}})
+    r = _bridge.BridgedPhaseTool(Legacy()).run(_client_err(err), MagicMock(), {})
+    assert r.error.category == "unsupported_rig"

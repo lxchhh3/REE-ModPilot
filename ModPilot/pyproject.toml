@@ -35,6 +35,7 @@ markers = [
     "integration: requires real Blender on port 9876",
     "blender: launches a headless Blender (tests/bl, tests/diff, tests/blender)",
     "live: talks to kevin's running Blender 5.2 on 9876 / 9877 (opt-in: -m live)",
+    "bridged_catalog: sees the real tool catalog (ported tools bridged), not the unit tests' legacy one",
 ]
 testpaths = ["tests"]
 

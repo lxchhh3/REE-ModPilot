@@ -28,6 +28,9 @@ from modpilot_host.transport import call_code, report_from_stdout, unwrap_bridge
 #: Tools whose new step passed its differential test against the legacy tool.
 PORTED: frozenset[str] = frozenset({
     "list_objects",      # M1: T2 tests/diff/test_list_objects.py, 13 checkpoints x 2 versions
+    # M2.1: T2 tests/diff/test_setup_diff.py (claude_run1 calls 0-3 + both preset writers, 2 versions)
+    "setup_import_source", "setup_validate_scene", "setup_infer_model_type",
+    "setup_preset_supplement_write", "setup_preset_custom_write", "setup_import_mhwilds",
 })
 
 #: How a ported query tool's report data becomes the legacy JSON it returned.
@@ -102,7 +105,8 @@ class BridgedPhaseTool(PhaseTool):
         try:
             report = _run(client, self.name, params)
         except StepError as err:
-            return PhaseResult.fail(PhaseError(category=_CATEGORY[err.category], operator=err.operator,
+            category = err.details.get("legacy_category") or _CATEGORY[err.category]
+            return PhaseResult.fail(PhaseError(category=category, operator=err.operator,
                                                message=err.message, raw=json.dumps(err.to_dict(), ensure_ascii=False)))
         except BlenderError as exc:
             return PhaseResult.fail(PhaseError(category="unexpected", operator=self.name, message=str(exc)[:2000]))

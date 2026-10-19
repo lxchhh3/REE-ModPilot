@@ -10,7 +10,7 @@ pytestmark = pytest.mark.unit
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "modpilot"
 BLENDER_MODULES = {"bpy", "mathutils", "bmesh", "addon_utils", "bpy_extras", "gpu", "idprop"}
-PURE = ["core/errors.py", "core/params.py", "core/report.py", "core/step.py", "core/config.py"]
+PURE = ["core/errors.py", "core/params.py", "core/report.py", "core/step.py", "core/config.py", "presets.py"]
 PURE_PACKAGES = ["formats", "geom", "checks"]
 
 
