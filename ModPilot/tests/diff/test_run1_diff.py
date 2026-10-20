@@ -31,6 +31,8 @@ CALLS = {
     8: 8,     # physics_classification
     9: 9,     # physics_chains prepare_only
     10: 10,   # physics_chains: 66 heads typed, 18 bones merged, SEPARATE settings
+    11: 14,   # collider_create
+    12: 15,   # collider_apply: every chain group's masks off
 }
 
 

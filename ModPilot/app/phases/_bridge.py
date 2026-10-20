@@ -37,6 +37,8 @@ PORTED: frozenset[str] = frozenset({
     "vertex_groups",
     # M2.4: T2 claude_run1 calls 7-10, 2 versions. physics_adjust waits: no golden call to diff
     "physics_transplant", "physics_classification", "physics_chains",
+    # M2.5: T2 claude_run1 calls 14-15, 2 versions
+    "collider_create", "collider_apply",
 })
 
 #: How a ported query tool's report data becomes the legacy JSON it returned.
