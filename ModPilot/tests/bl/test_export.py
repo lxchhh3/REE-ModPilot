@@ -118,3 +118,13 @@ def test_a_failed_bone_system_export_fails_the_step(tmp_path, monkeypatch):
         call("batch_export", params)
     assert e.value.category == "postcondition"
     assert "synthetic bonesystem failure" in str(e.value.details)
+
+
+def test_bindings_of_parts_not_exported_are_cleared(tmp_path):
+    root, params = _exportable(tmp_path)
+    scene, aid = bpy.context.scene, params["armor_id"]
+    scene[f"mhws_{aid}_3_mesh"] = "Stale.mesh"         # an earlier export of part 3
+    scene[f"mhws_{aid}_3_clsp"] = "Stale.clsp"
+    call("batch_export", params)
+    assert f"mhws_{aid}_3_mesh" not in scene and f"mhws_{aid}_3_clsp" not in scene
+    assert scene[f"mhws_{aid}_2_mesh"] == "MHWilds_Female.mesh"

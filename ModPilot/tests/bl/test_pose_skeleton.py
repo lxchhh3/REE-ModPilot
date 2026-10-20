@@ -32,9 +32,10 @@ def _vrchat_names():
     return _names("VRChat")
 
 
-def _source(arm_z=0.7, y=0.3):
-    """A small VRChat-named rig: hips plus both arms at height `arm_z`, shifted `y` in Y."""
-    n = _vrchat_names()
+def _source(arm_z=0.7, y=0.3, names=None):
+    """A small rig named from a Toolkit preset (VRChat unless `names`): hips plus both arms at
+    height `arm_z`, shifted `y` in Y."""
+    n = names or _vrchat_names()
     bones = [(n["pelvis"], None, (0, y, arm_z * 0.6), (0, y, arm_z * 0.7))]
     for side, sx in (("L", 1), ("R", -1)):
         prev = n["pelvis"]
@@ -136,3 +137,25 @@ def test_skeleton_align_needs_both_armatures(target):
     with pytest.raises(StepError) as e:
         _call("skeleton_align", {"x_preset": "VRChat", "source_armature": "Nope"})
     assert e.value.category == "precondition"
+
+
+# Found 2026-10-20 (M6 test mapping): both Toolkit conversions end in core/pose_ops._apply_and_rebind,
+# whose bpy.ops.object.select_grouped poll fails in headless Blender 5.2, even with the Layout 3D View
+# lent through temp_override. No landed build was MMD or Endfield (all VRChat); the legacy unit tests
+# only checked the generated code named the operator. Strict: passes once the conversion runs.
+CONVERSION_BROKEN = pytest.mark.xfail(strict=True, reason="Toolkit pose conversion: select_grouped poll fails headless")
+
+
+@pytest.mark.parametrize("preset, conversion, enums", [
+    pytest.param("MMD", "mmd_a_to_tpose", {"pose_import_preset_enum": "MMD.json"}, marks=CONVERSION_BROKEN),
+    pytest.param("arknights", "endfield", {"pose_import_preset_enum": "arknights.json",
+                                           "pose_preset_enum": "终末地 A转Tpose.json"}, marks=CONVERSION_BROKEN),
+])
+def test_mmd_and_endfield_rigs_get_their_t_pose_conversion(target, preset, conversion, enums):
+    # the Toolkit's own operator runs (modder.mmd_a_to_tpose / apply_transform_forward) on a rig named
+    # from that preset, with the pose presets the Toolkit's panel would set
+    _source(names=_names(preset))
+    r = _call("pose_correction", {"x_preset": preset, "source_armature": "Armature", "skip_scale_align": True})
+    assert r["data"]["pose_conversion"] == conversion
+    settings = bpy.context.scene.mhw_suite_settings
+    assert {k: getattr(settings, k) for k in enums} == enums

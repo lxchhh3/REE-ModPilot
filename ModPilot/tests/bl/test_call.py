@@ -153,3 +153,27 @@ def test_tests_run_with_blenders_window_context_as_sessions_and_live_blender_do(
     bpy.ops.mesh.select_all(action="SELECT")
     assert bpy.ops.uv.select_all(action="SELECT") == {"FINISHED"}
     bpy.ops.object.mode_set(mode="OBJECT")
+
+
+class _CancelsOp(bpy.types.Operator):
+    bl_idname = "modpilot_test.cancels"
+    bl_label = "Cancels"
+
+    def execute(self, context):
+        return {"CANCELLED"}
+
+
+def test_an_operator_that_cancels_is_an_operator_error():
+    from modpilot.core import errors, ops   # after the reload test above, the current StepError class
+    StepError = errors.StepError  # noqa: N806
+    bpy.utils.register_class(_CancelsOp)
+    try:
+        with pytest.raises(StepError) as e:
+            ops.run("modpilot_test.cancels")
+        assert (e.value.category, e.value.operator) == ("operator", "modpilot_test.cancels")
+        assert e.value.details["returned"] == ["CANCELLED"]
+        with pytest.raises(StepError) as e:
+            ops.run("modpilot_test.not_registered")
+        assert e.value.category == "environment"
+    finally:
+        bpy.utils.unregister_class(_CancelsOp)

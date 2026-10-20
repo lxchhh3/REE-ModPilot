@@ -158,3 +158,13 @@ def test_adjust_refuses_unknown_targets_and_properties_before_changing_anything(
             _call("physics_adjust", params)
         assert e.value.category == category
     assert cs.re_chain_chainsettings.damping == before
+
+
+def test_cleared_bones_lose_their_chain_mark_and_get_no_chain():
+    _grafted()
+    _transplant()
+    r = _chains({"inferred_types": {"Tail": "fur_tail"}, "bones_to_clear": ["Ribbon"]})
+    tgt = bpy.data.objects["MHWilds_Female Armature"]
+    assert tgt.pose.bones["Ribbon"].get("chain_role", "") == ""
+    assert "Ribbon" not in _groups() and "Tail" in _groups()
+    assert not r["warnings"] or not any("Ribbon" in w for w in r["warnings"])

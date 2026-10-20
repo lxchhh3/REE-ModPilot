@@ -73,7 +73,7 @@ def test_get_material_info_reports_the_output_shader_and_textures(tmp_path):
 
 
 def test_get_object_props():
-    _scene()
+    _scene()[1]["_internal"] = 1          # "_" keys are left out, as the legacy query did
     assert _q("get_object_props", {"object_name": "Body"}) == {"object": "Body", "type": "MESH",
                                                                 "custom_props": {"note": "hello"}}
 
