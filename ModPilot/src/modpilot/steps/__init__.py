@@ -4,6 +4,7 @@ from modpilot.steps import (  # noqa: F401
     doctor,
     export,
     fingerprint,
+    garments,
     materials,
     physics,
     pose,
