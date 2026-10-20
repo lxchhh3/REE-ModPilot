@@ -1,4 +1,4 @@
-"""Every in-Blender test file (tests/bl/test_*.py), run in headless Blender 4.3.0 and 5.2.2 through
+"""Every in-Blender test file (tests/bl/test_*.py), run in headless Blender 5.2.2 through
 modpilot_host.bpytest, so a plain `uv run pytest -m blender` covers them too."""
 from pathlib import Path
 

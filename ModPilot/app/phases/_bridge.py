@@ -43,11 +43,18 @@ PORTED: frozenset[str] = frozenset({
     "material_setup", "material_generate",
     # M2.7: T2 tests/diff/test_export_diff.py (exportable avatar, 2 versions, identical files)
     "batch_export",
+    # M2.8: T1 tests/bl/test_query.py, T2 tests/diff/test_query_diff.py (Blender 5.2)
+    "scene_info", "get_bone_info", "list_collections", "get_mesh_info", "get_material_info",
+    "get_object_props", "inspect_material_nodes", "physics_read", "list_mdf_presets",
 })
 
 #: How a ported query tool's report data becomes the legacy JSON it returned.
 QUERY_SHAPES = {
     "list_objects": lambda data: data["objects"],
+    "list_collections": lambda data: data["collections"],
+    **{name: (lambda data: data) for name in (
+        "scene_info", "get_bone_info", "get_mesh_info", "get_material_info", "get_object_props",
+        "inspect_material_nodes", "physics_read", "list_mdf_presets")},
 }
 
 _CATEGORY = {"params": "precondition", "precondition": "precondition", "environment": "precondition",

@@ -1,4 +1,4 @@
-"""modpilot.call inside Blender (T1, runs in headless 4.3.0 and 5.2.2 through modpilot_host.bpytest).
+"""modpilot.call inside Blender (T1, runs in headless 5.2.2 through modpilot_host.bpytest).
 
 The contract every channel relies on: a call returns a plain-JSON report and prints it as one
 MODPILOT_REPORT= line; any failure raises StepError, whose text is MODPILOT_ERROR=<json>; nothing

@@ -2,7 +2,7 @@
 own isolated profile (tools-5.2 compat.runtime) with the pinned add-ons and the modpilot package
 linked in, so a crash loses one file and two runs never share state.
 
-    python -m modpilot_host.bpytest [--blender 4.3.0] [--blender 5.2.2] [-k EXPR] tests/bl/test_x.py ...
+    python -m modpilot_host.bpytest [--blender 5.2.2] [-k EXPR] tests/bl/test_x.py ...
 
 Exit code 0 when every file passed in every version. Logs: tools-5.2/runtime/logs/bpytest/<version>/.
 """
@@ -20,7 +20,8 @@ from modpilot_host import tools52
 
 BOOT = tools52.MODPILOT / "tests" / "bl" / "_boot.py"
 INI = tools52.MODPILOT / "tests" / "bl" / "pytest.ini"
-VERSIONS = ("4.3.0", "5.2.2")
+# Blender 5.2 only: 4.3 is out of scope (kevin, 2026-10-20)
+VERSIONS = ("5.2.2",)
 
 
 @dataclass

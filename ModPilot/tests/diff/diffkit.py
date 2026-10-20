@@ -13,10 +13,10 @@ from pathlib import Path
 import pytest
 
 from app.blender.client import BlenderClient
-from modpilot_host import tools52
+from modpilot_host import bpytest, tools52
 from modpilot_host.session import HeadlessSession
 
-VERSIONS = ("4.3.0", "5.2.2")
+VERSIONS = bpytest.VERSIONS        # Blender 5.2 only (kevin, 2026-10-20)
 
 
 def checkpoint_dir(version: str) -> Path:
