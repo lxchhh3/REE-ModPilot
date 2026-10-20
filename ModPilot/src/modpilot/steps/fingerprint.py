@@ -140,6 +140,26 @@ def _chain(bpy, n):
     return out
 
 
+NODE_SETTINGS = ("operation", "blend_type", "data_type", "interpolation", "space", "extension", "projection")
+
+
+def _node_values(node, n):
+    """The unlinked input values and the settings of a shader node, as `name:key=value` strings."""
+    out = [f"{node.name}:{a}={getattr(node, a)}" for a in NODE_SETTINGS if hasattr(node, a)]
+    for inp in node.inputs:
+        if inp.is_linked or not hasattr(inp, "default_value"):
+            continue
+        v = inp.default_value
+        if isinstance(v, bool | int | float):
+            v = _r(v, n)
+        elif hasattr(v, "__len__") and not isinstance(v, str):
+            v = _vec(v, n)
+        else:
+            continue
+        out.append(f"{node.name}:{inp.identifier}={v}")
+    return out
+
+
 def _materials(bpy, n):
     out = {}
     for m in bpy.data.materials:
@@ -151,6 +171,7 @@ def _materials(bpy, n):
             entry["links"] = sorted(f"{lk.from_node.bl_idname}.{lk.from_socket.identifier}->"
                                     f"{lk.to_node.bl_idname}.{lk.to_socket.identifier}" for lk in m.node_tree.links)
             entry["images"] = sorted(node.image.name for node in nodes if getattr(node, "image", None))
+            entry["values"] = sorted(v for node in nodes for v in _node_values(node, n))
         out[m.name] = entry
     return out
 

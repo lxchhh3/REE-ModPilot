@@ -3,6 +3,7 @@ from modpilot.steps import (  # noqa: F401
     colliders,
     doctor,
     fingerprint,
+    materials,
     physics,
     pose,
     query,

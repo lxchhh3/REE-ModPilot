@@ -86,3 +86,18 @@ def test_the_fingerprint_does_not_change_the_scene():
     _two_part_scene()
     r = modpilot.call("scene_fingerprint", quiet=True)
     assert r["scene_diff"] == {}
+
+
+@pytest.mark.parametrize("change", ["socket_value", "node_setting"])
+def test_a_shader_value_changes_the_materials_section(change):
+    from modpilot.testing.materials import node_material
+    mat = node_material("Shader")
+    tree = mat.node_tree
+    sub = tree.nodes.new("ShaderNodeMath")
+    before = modpilot.call("scene_fingerprint", quiet=True)["data"]["sections"]["materials"]
+    if change == "socket_value":
+        next(n for n in tree.nodes if n.type == "BSDF_PRINCIPLED").inputs["Roughness"].default_value = 0.123
+    else:
+        sub.operation = "SUBTRACT"
+    after = modpilot.call("scene_fingerprint", quiet=True)["data"]["sections"]["materials"]
+    assert after != before

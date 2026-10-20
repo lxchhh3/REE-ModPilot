@@ -196,13 +196,22 @@ class BlenderClient:
 
     # ── high-level helpers ─────────────────────────────────────────────────
 
-    def execute(self, code: str) -> str:
+    def execute(self, code: str, timeout: float | None = None) -> str:
         """
         Run Python in Blender's main thread; return captured stdout as a string.
 
         Note: the last expression of code is NOT auto-returned — always print().
+        timeout: if given, overrides the socket timeout for this call only.
         """
-        result = self.call("execute_code", {"code": code})
+        if timeout is not None and self._sock is not None:
+            prev = self._sock.gettimeout()
+            self._sock.settimeout(timeout)
+            try:
+                result = self.call("execute_code", {"code": code})
+            finally:
+                self._sock.settimeout(prev)
+        else:
+            result = self.call("execute_code", {"code": code})
         return result.get("result", "")
 
     def execute_and_extract(self, code: str, timeout: float | None = None) -> list[str]:
@@ -221,15 +230,7 @@ class BlenderClient:
             print(BLENDER_SENTINEL)   # sentinel goes AFTER operator call
             print(ret)
         """
-        if timeout is not None and self._sock is not None:
-            prev = self._sock.gettimeout()
-            self._sock.settimeout(timeout)
-            try:
-                full = self.execute(code)
-            finally:
-                self._sock.settimeout(prev)
-        else:
-            full = self.execute(code)
+        full = self.execute(code, timeout=timeout)
         lines = full.splitlines()
         try:
             idx = lines.index(BLENDER_SENTINEL)

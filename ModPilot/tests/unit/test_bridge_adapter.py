@@ -116,3 +116,22 @@ def test_a_step_error_can_carry_the_legacy_category_the_agent_loop_keys_on():
                     details={"legacy_category": "unsupported_rig", "result": {"decision": "unsupported"}})
     r = _bridge.BridgedPhaseTool(Legacy()).run(_client_err(err), MagicMock(), {})
     assert r.error.category == "unsupported_rig"
+
+
+def test_a_bridged_step_gets_the_long_timeout_the_legacy_tools_set_per_call():
+    # material_generate bakes for minutes; the client's 30 s default timed it out in L3
+    c = _client_ok(_report("legacy_x", {}))
+    _bridge._run(c, "legacy_x", {})
+    assert c.execute.call_args.kwargs["timeout"] == _bridge.STEP_TIMEOUT >= 1200
+
+
+def test_the_client_overrides_its_socket_timeout_for_one_call_only():
+    from app.blender.client import BlenderClient
+    client = BlenderClient(timeout=30.0)
+    client._sock = MagicMock()
+    client._sock.gettimeout.return_value = 30.0
+    seen = []
+    client.call = lambda *a, **k: seen.append(client._sock.settimeout.call_args.args[0]) or {"result": "out"}
+    assert client.execute("x", timeout=1800) == "out"
+    assert seen == [1800]
+    assert client._sock.settimeout.call_args.args[0] == 30.0

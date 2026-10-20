@@ -39,6 +39,8 @@ PORTED: frozenset[str] = frozenset({
     "physics_transplant", "physics_classification", "physics_chains",
     # M2.5: T2 claude_run1 calls 14-15, 2 versions
     "collider_create", "collider_apply",
+    # M2.6: T2 tests/diff/test_materials_diff.py (synthetic avatar, 2 versions, identical files)
+    "material_setup", "material_generate",
 })
 
 #: How a ported query tool's report data becomes the legacy JSON it returned.
@@ -50,10 +52,15 @@ _CATEGORY = {"params": "precondition", "precondition": "precondition", "environm
              "operator": "operator_failed", "postcondition": "operator_failed", "internal": "unexpected"}
 
 
+# Per call, as the legacy tools set theirs (up to 1200 s): material_generate bakes and physics_chains
+# builds for minutes, past the client's 30 s default. modpilot_host.BridgeTransport uses the same.
+STEP_TIMEOUT = 1800.0
+
+
 def _run(client: BlenderClient, name: str, params: dict) -> dict:
     """The step's report; raises StepError, or BlenderError when the bridge failed otherwise."""
     try:
-        stdout = client.execute(call_code(name, params))
+        stdout = client.execute(call_code(name, params), timeout=STEP_TIMEOUT)
     except BlenderError as exc:
         err, inner = unwrap_bridge_error(str(exc))
         if err is not None:
