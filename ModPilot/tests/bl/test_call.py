@@ -142,3 +142,14 @@ def test_an_edited_module_is_reloaded_on_the_next_call():
 def test_the_report_names_the_code_that_ran():
     code = modpilot.call("doctor", quiet=True)["code"]
     assert len(code["sha"]) == 40 and isinstance(code["dirty"], bool)
+
+
+def test_tests_run_with_blenders_window_context_as_sessions_and_live_blender_do():
+    # operators that need a UI context (uv.select_all, inside re_mesh.solve_repeated_uvs) poll on it
+    import bpy
+    assert bpy.context.window is not None and bpy.context.screen is not None
+    bpy.ops.mesh.primitive_plane_add()
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    assert bpy.ops.uv.select_all(action="SELECT") == {"FINISHED"}
+    bpy.ops.object.mode_set(mode="OBJECT")

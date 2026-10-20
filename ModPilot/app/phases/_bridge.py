@@ -41,6 +41,8 @@ PORTED: frozenset[str] = frozenset({
     "collider_create", "collider_apply",
     # M2.6: T2 tests/diff/test_materials_diff.py (synthetic avatar, 2 versions, identical files)
     "material_setup", "material_generate",
+    # M2.7: T2 tests/diff/test_export_diff.py (exportable avatar, 2 versions, identical files)
+    "batch_export",
 })
 
 #: How a ported query tool's report data becomes the legacy JSON it returned.

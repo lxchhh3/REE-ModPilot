@@ -2,6 +2,7 @@
 from modpilot.steps import (  # noqa: F401
     colliders,
     doctor,
+    export,
     fingerprint,
     materials,
     physics,

@@ -59,7 +59,7 @@ def test_the_same_scene_gives_the_same_fingerprint():
     assert a["digest"] == b["digest"] and a["sections"] == b["sections"]
 
 
-@pytest.mark.parametrize("change", ["bone", "weight", "key", "uv_name", "material"])
+@pytest.mark.parametrize("change", ["bone", "weight", "key", "uv_name", "material", "smooth"])
 def test_a_change_the_pipeline_cares_about_changes_the_fingerprint(change):
     arm, body = _two_part_scene()
     before = modpilot.call("scene_fingerprint", quiet=True)["data"]
@@ -76,6 +76,8 @@ def test_a_change_the_pipeline_cares_about_changes_the_fingerprint(change):
         body.data.uv_layers.new(name="UVMap2")
     elif change == "material":
         body.data.materials.append(bpy.data.materials.new("Other"))
+    elif change == "smooth":        # what re_mesh.solve_repeated_uvs does before export
+        body.data.polygons[0].use_smooth = not body.data.polygons[0].use_smooth
     after = modpilot.call("scene_fingerprint", quiet=True)["data"]
     assert after["digest"] != before["digest"]
     changed = [k for k in before["sections"] if before["sections"][k] != after["sections"][k]]

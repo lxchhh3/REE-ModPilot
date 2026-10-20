@@ -58,3 +58,27 @@ def groups():
         head = node.constraints["BoneName"].subtarget if node else ""
         out[head] = o
     return out
+
+
+def exportable(folder):
+    """The avatar carried through chains, colliders and materials, ready for batch_export into
+    `folder`/mod; returns (mod root, batch_export params for armor pl024 ff, part 2 Body)."""
+    from pathlib import Path
+
+    from modpilot.testing.materials import node_material, png
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    grafted()
+    transplant()
+    chains({"inferred_types": TYPES})
+    call("collider_create")
+    bpy.data.objects["Body"].data.uv_layers.new(name="UVMap")    # RE Mesh exports no mesh without one
+    node_material("BodyMat")
+    call("material_setup", {"target_object": "Body", "x_preset": "VRChat", "texture_mapping": {
+        "BodyMat": {"Base Color": png(folder / "body.png", (0.8, 0.7, 0.6, 1.0))}}})
+    root = folder / "mod"
+    root.mkdir()
+    call("material_generate", {"natives_root": str(root), "texture_base_path": "test/Avatar/",
+                               "preset_mapping": {"BodyMat": "Skin"}})
+    return root, {"armor_id": "pl024", "armor_variant": "ff", "target_parts": ["2"],
+                  "fbxskel_name": "test_Avatar", "natives_root": str(root)}

@@ -112,6 +112,8 @@ def _meshes(bpy, n):
                        "materials": [m.name if m else None for m in me.materials],
                        "face_materials": _digest(np.array([p.material_index for p in me.polygons]), 0),
                        "uv_layers": [u.name for u in me.uv_layers],
+                       "smooth": _digest(np.array([p.use_smooth for p in me.polygons], dtype=np.float64), 0),
+                       "custom_normals": me.has_custom_normals,
                        "colors": [[c.name, c.domain, c.data_type] for c in me.color_attributes],
                        "groups": {k: _r(v, n) for k, v in sorted(sums.items())}, "keys": keys}
     return out
