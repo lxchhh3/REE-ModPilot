@@ -46,6 +46,8 @@ PORTED: frozenset[str] = frozenset({
     # M2.8: T1 tests/bl/test_query.py, T2 tests/diff/test_query_diff.py (Blender 5.2)
     "scene_info", "get_bone_info", "list_collections", "get_mesh_info", "get_material_info",
     "get_object_props", "inspect_material_nodes", "physics_read", "list_mdf_presets",
+    # M5 prep: T2 tests/diff/test_last_tools_diff.py (rigs + textured avatar, Blender 5.2)
+    "physics_adjust", "material_inspect", "material_consolidate",
 })
 
 #: How a ported query tool's report data becomes the legacy JSON it returned.

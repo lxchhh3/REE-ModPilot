@@ -2,8 +2,11 @@
 Principled BSDF (VRChat normals through a 1-Y chain, Endfield's directly; emission into 'Emission
 Color' with its strength turned on), checking the whole mapping before it changes anything;
 material_generate runs the Toolkit's MDF2 generator with the agreed presets and fails on any
-material the generator could not make (the generator itself only prints them)."""
+material the generator could not make (the generator itself only prints them); material_inspect
+reads what is wired where; material_consolidate groups materials by the textures they use and merges
+the groups it is given."""
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -178,3 +181,99 @@ def test_a_material_the_generator_fails_on_fails_the_step_by_name(tmp_path, monk
     assert e.value.category == "postcondition"
     assert e.value.details["failed"] == {"MatB": "synthetic failure"}
     assert e.value.partial["materials_processed"] == ["MatA"]
+
+
+# ── material_inspect ──────────────────────────────────────────────────────
+
+
+def _inspect(tmp_path, **over):
+    return _call("material_inspect", {"target_object": "Body", "texture_dir": str(tmp_path / "tex"), **over})
+
+
+def test_inspect_traces_each_wired_slot_back_to_its_image(tmp_path):
+    tex, _ = _setup(tmp_path)
+    (tmp_path / "tex" / "notes.txt").write_text("not an image")
+    r = _inspect(tmp_path)["data"]
+    assert r["materials"] == ["MatA", "MatB"]
+    assert r["texture_files"] == sorted(str(p) for p in (tmp_path / "tex").glob("*.png"))
+    none = dict.fromkeys(("Base Color", "Alpha", "Roughness", "Metallic", "Emission", "Normal"))
+    # the VRChat normal goes through the 1-Y chain and a Normal Map node, and is still traced
+    assert r["existing_connections"] == {"MatA": {**none, **tex["MatA"]}, "MatB": {**none, **tex["MatB"]}}
+
+
+def test_inspect_before_wiring_finds_nothing_connected(tmp_path):
+    textured_avatar(tmp_path / "tex")
+    r = _inspect(tmp_path, purpose="verify")["data"]
+    assert all(v is None for slots in r["existing_connections"].values() for v in slots.values())
+
+
+@pytest.mark.parametrize("over, category", [
+    ({"target_object": "Nope"}, "precondition"),
+    ({"texture_dir": "<missing>"}, "precondition"),
+    ({"purpose": "guess"}, "params"),
+])
+def test_inspect_refuses_a_bad_target_folder_or_purpose(tmp_path, over, category):
+    textured_avatar(tmp_path / "tex")
+    if over.get("texture_dir") == "<missing>":
+        over = {"texture_dir": str(tmp_path / "nowhere")}
+    with pytest.raises(StepError) as e:
+        _inspect(tmp_path, **over)
+    assert e.value.category == category
+
+
+# ── material_consolidate ──────────────────────────────────────────────────
+
+
+def _shared(tmp_path):
+    """MatA and MatB on the same base colour texture, plus 'Plain' (no textures) in a third slot."""
+    tex = textured_avatar(tmp_path / "tex")
+    bc = tex["MatA"]["Base Color"]
+    _call("material_setup", {"target_object": "Body", "x_preset": "VRChat",
+                             "texture_mapping": {"MatA": {"Base Color": bc}, "MatB": {"Base Color": bc}}})
+    bpy.data.objects["Body"].data.materials.append(node_material("Plain"))
+    return bc
+
+
+def _slots():
+    body = bpy.data.objects["Body"].data
+    return [m.name for m in body.materials], [p.material_index for p in body.polygons]
+
+
+def test_a_dry_run_groups_materials_by_their_textures_and_changes_nothing(tmp_path):
+    _shared(tmp_path)
+    r = _call("material_consolidate", {"target_object": "Body"})["data"]
+    assert r["material_count_before"] == 3
+    assert r["consolidation_groups"] == [
+        {"texture_set": [os.path.normcase("MatA_BC.png")], "materials": ["MatA", "MatB"], "keeper": "MatA", "to_remove": ["MatB"],
+         "is_singleton": False},
+        {"texture_set": [], "materials": ["Plain"], "keeper": "Plain", "to_remove": [], "is_singleton": True}]
+    assert _slots() == (["MatA", "MatB", "Plain"], [0, 1])
+
+
+@pytest.mark.parametrize("keeper, removed, slots", [
+    ("MatA", "MatB", (["MatA", "Plain"], [0, 0])),
+    ("MatB", "MatA", (["MatB", "Plain"], [0, 0])),     # the keeper's slot moves down
+])
+def test_merging_moves_the_faces_to_the_keeper_and_drops_the_slot(tmp_path, keeper, removed, slots):
+    _shared(tmp_path)
+    r = _call("material_consolidate", {"target_object": "Body", "dry_run": False,
+                                       "groups": [{"keeper": keeper, "to_remove": [removed]}]})["data"]
+    assert r["merged_groups"] == [{"keeper": keeper, "removed": [removed]}]
+    assert (r["material_count_before"], r["material_count_after"], r["skipped"]) == (3, 2, [])
+    assert _slots() == slots
+
+
+@pytest.mark.parametrize("params, category", [
+    ({"dry_run": False}, "params"),
+    ({"dry_run": False, "groups": [{"keeper": "MatA", "to_remove": ["Nope"]}]}, "precondition"),
+    ({"dry_run": False, "groups": [{"keeper": "Nope", "to_remove": ["MatB"]}]}, "precondition"),
+    ({"dry_run": False, "groups": [{"keeper": "MatA", "to_remove": ["MatA"]}]}, "params"),
+    ({"dry_run": False, "groups": [{"keeper": "MatA"}]}, "params"),
+    ({"target_object": "Nope"}, "precondition"),
+])
+def test_consolidate_checks_every_group_before_merging_any(tmp_path, params, category):
+    _shared(tmp_path)
+    with pytest.raises(StepError) as e:
+        _call("material_consolidate", {"target_object": "Body", **params})
+    assert e.value.category == category
+    assert _slots() == (["MatA", "MatB", "Plain"], [0, 1])

@@ -13,6 +13,10 @@ Changes from the legacy tools (no silent paths):
   and on every material the generator could not make: the generator prints those and its operator
   still returns FINISHED. It returns the MDF2 collection it wrote into (the legacy tool returned the
   setting, empty unless given) and records it in the scene config.
+- material_consolidate checks every merge group (keeper and each name to remove on the mesh, none
+  both) before it merges any; the legacy tool skipped unknown names. Its dry run no longer asks a
+  vision model about partly overlapping groups (vision_merge_proposals).
+- material_inspect fails on an unknown `purpose` (the legacy tool ignored it; the agent loop read it).
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ import os
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from modpilot.core.config import resolve
 from modpilot.core.errors import StepError
@@ -253,3 +258,154 @@ def material_generate(p: GenerateParams, ctx) -> dict:
         raise StepError("postcondition", f"the generator failed on {len(failed)} material(s): {failed}",
                         details={"failed": failed}, partial=data)
     return data
+
+
+# ── material_inspect ──────────────────────────────────────────────────────
+
+IMAGE_EXTENSIONS = frozenset({".png", ".tga", ".dds", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"})
+PURPOSES = ("classify", "verify")
+
+
+@dataclass(frozen=True)
+class InspectParams:
+    target_object: str
+    texture_dir: str
+    purpose: str = "classify"     # the old agent loop's widget switch; no effect on the step
+
+
+def _mesh(name):
+    import bpy
+    obj = bpy.data.objects.get(name)
+    if obj is None or obj.type != "MESH":
+        raise StepError("precondition", f"no mesh object named {name!r}", details={"target_object": name})
+    return obj
+
+
+def _trace_to_image(node, depth=0):
+    """The absolute path of the image feeding `node` through its first linked input, else 'connected_no_image'."""
+    import bpy
+    if depth > 6:
+        return "connected_no_image"
+    if node.type == "TEX_IMAGE":
+        return bpy.path.abspath(node.image.filepath) if node.image else "connected_no_image"
+    for inp in node.inputs:
+        if inp.is_linked:
+            return _trace_to_image(inp.links[0].from_node, depth + 1)
+    return "connected_no_image"
+
+
+@step("material_inspect", InspectParams)
+def material_inspect(p: InspectParams, ctx) -> dict:
+    """The mesh's materials, the image files in texture_dir (not its subfolders), and per material
+    which Principled BSDF slots are wired, to which image."""
+    if p.purpose not in PURPOSES:
+        raise StepError("params", f"purpose must be one of {PURPOSES}, not {p.purpose!r}")
+    folder = Path(p.texture_dir)
+    if not folder.is_dir():
+        raise StepError("precondition", f"texture_dir is not a folder: {p.texture_dir!r}")
+    obj = _mesh(p.target_object)
+    files = sorted(str(f) for f in folder.iterdir() if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS)
+    connections = {}
+    for mat in obj.data.materials:
+        if mat is None:
+            continue
+        state = dict.fromkeys(SLOTS)
+        bsdf = _bsdf(mat)
+        if bsdf is not None:
+            for slot in SLOTS:
+                sock = _socket(bsdf, slot)
+                if sock is not None and sock.is_linked:
+                    state[slot] = _trace_to_image(sock.links[0].from_node)
+        connections[mat.name] = state
+    return {"materials": [m.name for m in obj.data.materials if m is not None], "texture_files": files,
+            "existing_connections": connections}
+
+
+# ── material_consolidate ──────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ConsolidateParams:
+    target_object: str
+    dry_run: bool = True
+    groups: list[dict] = field(default_factory=list)
+
+
+def _texture_set(mat) -> tuple[str, ...]:
+    """Every image file the material's node tree references, linked or not (normalized, sorted)."""
+    import bpy
+    paths = set()
+    if mat.node_tree is not None:
+        for n in mat.node_tree.nodes:
+            if n.type == "TEX_IMAGE" and n.image is not None and n.image.filepath:
+                paths.add(os.path.normcase(os.path.normpath(bpy.path.abspath(n.image.filepath))))
+    return tuple(sorted(paths))
+
+
+def _scan(obj) -> dict:
+    by_set: dict[tuple, list[str]] = {}
+    mats = [m for m in obj.data.materials if m is not None]
+    for m in mats:
+        by_set.setdefault(_texture_set(m), []).append(m.name)
+    groups = []
+    for key, members in by_set.items():
+        if not key:                       # no textures: never merged
+            groups += [{"texture_set": [], "materials": [m], "keeper": m, "to_remove": [], "is_singleton": True}
+                       for m in members]
+            continue
+        groups.append({"texture_set": sorted({os.path.basename(x) for x in key}), "materials": list(members),
+                       "keeper": members[0], "to_remove": members[1:], "is_singleton": len(members) == 1})
+    return {"consolidation_groups": groups, "material_count_before": len(mats)}
+
+
+def _check_groups(groups, names) -> list[tuple[str, list[str]]]:
+    out = []
+    for g in groups:
+        if set(g) - {"keeper", "to_remove"} or not isinstance(g.get("keeper"), str) \
+                or not isinstance(g.get("to_remove"), list):
+            raise StepError("params", f"a group is {{keeper: name, to_remove: [names]}}, not {g!r}")
+        keeper, remove = g["keeper"], g["to_remove"]
+        if keeper in remove:
+            raise StepError("params", f"{keeper!r} is both the keeper and to be removed")
+        missing = [n for n in [keeper, *remove] if n not in names]
+        if missing:
+            raise StepError("precondition", f"material(s) not on the mesh: {missing}",
+                            details={"missing": missing, "materials": sorted(names)})
+        out.append((keeper, list(remove)))
+    return out
+
+
+@step("material_consolidate", ConsolidateParams)
+def material_consolidate(p: ConsolidateParams, ctx) -> dict:
+    """Dry run: group the mesh's materials by the image files they reference (a proposal; nothing
+    changes). Otherwise: for each given group, move the faces of every material in to_remove to the
+    keeper and drop that slot."""
+    obj = _mesh(p.target_object)
+    if p.dry_run:
+        return _scan(obj)
+    if not p.groups:
+        raise StepError("params", "groups is required when dry_run is false (run a dry run for a proposal)")
+    mesh = obj.data
+    plan = _check_groups(p.groups, {m.name for m in mesh.materials if m is not None})
+    before = len([m for m in mesh.materials if m is not None])
+
+    def index(name):
+        return next(i for i, m in enumerate(mesh.materials) if m is not None and m.name == name)
+
+    merged = []
+    for keeper, remove in plan:
+        done = []
+        for name in remove:
+            k, r = index(keeper), index(name)
+            idx = [0] * len(mesh.polygons)
+            mesh.polygons.foreach_get("material_index", idx)
+            idx = [k if i == r else i for i in idx]
+            mesh.materials.pop(index=r)
+            idx = [i - 1 if i > r else i for i in idx]
+            mesh.polygons.foreach_set("material_index", idx)
+            done.append(name)
+        if done:
+            merged.append({"keeper": keeper, "removed": done})
+    mesh.update()
+    return {"merged_groups": merged, "skipped": [], "material_count_before": before,
+            "material_count_after": len([m for m in mesh.materials if m is not None])}

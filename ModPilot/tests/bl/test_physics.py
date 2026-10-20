@@ -141,7 +141,7 @@ def test_adjust_sets_scalars_and_vectors():
     _chains({"inferred_types": TYPES})
     cs = _groups()["Tail"].parent
     r = _call("physics_adjust", {"targets": [cs.name], "properties": {"damping": 0.3, "gravity": [0, -2.0, 0]}})
-    assert r["data"]["adjusted"] == [{"target": cs.name, "status": "ok", "errors": []}]
+    assert r["data"] == {"adjusted_targets": [cs.name]}   # the legacy tool's result
     assert cs.re_chain_chainsettings.damping == pytest.approx(0.3)
     assert tuple(cs.re_chain_chainsettings.gravity) == pytest.approx((0, -2.0, 0))
 

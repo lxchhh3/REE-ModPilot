@@ -470,6 +470,6 @@ def physics_adjust(p: AdjustParams, ctx) -> dict:
                     setattr(pg, key, val)
             except (TypeError, ValueError, IndexError) as exc:
                 raise StepError("params", f"{obj.name}.{key} = {val!r}: {exc}",
-                                partial={"adjusted": results}) from exc
-        results.append({"target": obj.name, "status": "ok", "errors": []})
-    return {"adjusted": results}
+                                partial={"adjusted_targets": results}) from exc
+        results.append(obj.name)
+    return {"adjusted_targets": results}
