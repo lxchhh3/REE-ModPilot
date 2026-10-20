@@ -12,7 +12,7 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "modpilot"
 BLENDER_MODULES = {"bpy", "mathutils", "bmesh", "addon_utils", "bpy_extras", "gpu", "idprop"}
 PURE = ["core/errors.py", "core/params.py", "core/report.py", "core/step.py", "core/config.py", "presets.py",
         "datafiles.py", "physics.py", "colliders.py"]
-PURE_PACKAGES = ["formats", "geom", "checks"]
+PURE_PACKAGES = ["formats", "geom", "checks", "mods"]
 
 
 def _imports(tree, top_level_only):
