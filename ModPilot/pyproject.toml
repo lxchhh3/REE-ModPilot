@@ -1,42 +1,29 @@
 [project]
 name = "modpilot"
 version = "0.1.0"
-description = "AI-guided Blender automation for RE Engine character mods"
+description = "RE Engine character-mod steps that run inside Blender (modpilot) and their host-side tools (modpilot_host)"
 readme = "README.md"
 requires-python = ">=3.11"
+# modpilot runs in Blender's own Python (bpy, mathutils, numpy are Blender's); the host side needs numpy
+# for the bpy-free geometry tests only.
 dependencies = [
-    "anthropic>=0.100.0",
-    "fastapi>=0.136.1",
-    "httpx>=0.28.1",
-    "jinja2>=3.1.6",
     "numpy>=1.26",
-    "openai>=2.36.0",
-    "pillow>=11.0.0",
-    "pydantic-settings>=2.14.1",
-    "python-dotenv>=1.2.2",
-    "sse-starlette>=3.4.4",
-    "uvicorn[standard]>=0.46.0",
 ]
 
 [dependency-groups]
 dev = [
-    "playwright>=1.59.0",
     "pytest>=9.0.3",
-    "pytest-asyncio>=1.3.0",
     "ruff>=0.15.12",
 ]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 pythonpath = ["src"]
 # tests/bl run INSIDE Blender (python -m modpilot_host.bpytest, or tests/blender/test_in_blender.py)
 addopts = "--ignore=tests/bl"
 markers = [
     "unit: fast tests, no external services required",
-    "integration: requires real Blender on port 9876",
-    "blender: launches a headless Blender (tests/bl, tests/diff, tests/blender)",
+    "blender: launches a headless Blender (tests/bl through tests/blender)",
     "live: talks to kevin's running Blender 5.2 on 9876 / 9877 (opt-in: -m live)",
-    "bridged_catalog: sees the real tool catalog (ported tools bridged), not the unit tests' legacy one",
 ]
 testpaths = ["tests"]
 
