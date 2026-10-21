@@ -1,5 +1,9 @@
 # REE-ModPilot Design Decisions
 
+> **2026-10-21:** many of these decisions (A1, B5–B7, C9–C11, C13, C25, D14, E16, E18) were
+> replaced by the restructure. [restructure.md](restructure.md) lists each with what replaced it.
+> The text below is Dimi's original record, kept as it was.
+
 A compact reference of the load-bearing decisions behind ModPilot. Each item lists the
 decision, one paragraph of rationale, one-line rejections of the main alternatives, and
 (when relevant) the escape hatch we left for the future. Discussion notes have been

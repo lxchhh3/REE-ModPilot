@@ -1,141 +1,98 @@
 # AGENTS.md
 
-Baseline guide for AI agents and contributors working on REE-ModPilot.
+Baseline guide for AI agents and contributors working on REE-ModPilot (kevin's fork).
 
-For project overview see [README.md](README.md).
-For design rationale see [docs/dev/design.md](docs/dev/design.md).
-For Claude-specific working notes see [CLAUDE.md](CLAUDE.md).
-
----
-
-## Project at a Glance
-
-- **What**: Step-by-step AI guide + Blender automation for RE Engine character mod creation.
-- **Stack**: Python 3.11+, FastAPI, uv, React 19 + TypeScript + Vite + motion SPA (optional Tauri v2 shell — see C25), hand-rolled ReAct over Anthropic / OpenAI SDKs.
-- **Key constraint**: LLM only makes classification decisions inside phase tools and orchestrates *between* phases; deterministic Python orchestrates *within* phases.
-- **MVP scope**: MHWs single-game, plan.md videos 1-7, user-provided MMD/VRC source models, L3 (in-game) acceptance.
+Overview: [README.md](README.md). Why the code is shaped this way:
+[docs/dev/restructure.md](docs/dev/restructure.md). Claude Code notes: [CLAUDE.md](CLAUDE.md).
 
 ---
 
-## Common Commands
+## Project at a glance
 
-All commands run from the `ModPilot/` directory unless noted.
+- **What:** MH Wilds character-mod steps that run inside Blender, called one at a time by an agent
+  (Claude Code) or a test.
+- **Stack:** Python 3.11+ (Blender 5.2.2's own Python for `modpilot`), numpy, uv, pytest, ruff.
+- **Depends on:** the Modding-Toolkit, Modder_Batch_Tool, RE Mesh Editor, RE Chain Editor and
+  blender-mcp add-ons at the versions pinned in `tools-5.2/pins.toml`.
+
+---
+
+## Common commands
+
+Run these from `ModPilot/`. `uv run pytest` fails here (trampoline error, lesson #45); call the
+venv's Python.
 
 ```bash
-# One-time dev environment
-uv venv
-uv sync                                              # install from uv.lock
+uv sync                                                    # host environment
+uv pip install --target .bldeps --python-version 3.11 pytest   # pytest for Blender's Python (T1)
 
-# Add / update deps
-uv add fastapi anthropic openai pydantic-settings
-uv add --dev ruff pytest pytest-asyncio
+.venv/Scripts/python.exe -m pytest tests/core              # T0: bpy-free, seconds
+.venv/Scripts/python.exe -m modpilot_host.bpytest tests/bl/test_physics.py   # T1: one file in headless Blender
+.venv/Scripts/python.exe -m pytest                         # T0 + every T1 file (~6 min)
+.venv/Scripts/python.exe -m pytest -m live                 # read-only doctor in kevin's Blender (9876/9877)
 
-# Run dev server
-uv run uvicorn app.main:app --reload
-
-# Lint + format (Ruff)
-uv run ruff check app tests
-uv run ruff check app tests --fix
-uv run ruff format app tests
-
-# Tests
-uv run pytest                                        # unit tests (mock Blender)
-uv run pytest -m integration                         # integration tests (Blender on 9876)
-uv run pytest tests/unit/test_blender_client.py -v   # single file
-uv run pytest -k "test_recv_response"                # match by name
-
-# Playwright browser smokes (opt-in — not pytest-collected; standalone scripts)
-# One-time: uv add --dev playwright && uv run playwright install chromium
-# Server must be running on 8000 first (LLM_API_KEY=dummy LLM_BASE_URL=... uv run uvicorn ...)
-uv run python tests/e2e/error_choice_ui.py           # issue #2 — 3-button error-choice UI
-uv run python tests/e2e/session_config_form.py       # issue #3 — session-config form
-uv run python tests/e2e/widget_classification_ui.py  # issue #7 — physics classification widget
-
-# Stage scripts (top-level, not inside pytest)
-uv run python ../verify_blender_mcp.py
-uv run python ../verify_mvp.py
+.venv/Scripts/ruff check src tests
+.venv/Scripts/ruff format src tests
 ```
 
----
-
-## Hard Rules (non-negotiable)
-
-These are sourced from [docs/dev/design.md](docs/dev/design.md) decisions. Do not violate without amending design.md first.
-
-1. **LLM autonomy is bounded**. LLM makes classification decisions inside phase tools and orchestrates which phase to invoke at the top level — never manage operator-level calls. (B6)
-2. **No `execute_code` escape hatch in MVP**. Don't expose `BlenderConnection.execute_code(...)` as a tool the LLM can call directly. The implementation stays available for debug. (B6)
-3. **State cache is single-source**. All phase tools read/write the cache in `app/blender/state.py`. No local state in phase tools. (B5)
-4. **Errors are structured**. Phase tools return `Result<state_diff, structured_error>`. Never let raw exceptions propagate to the LLM. (B7)
-5. **Provider abstraction is mandatory**. Business code calls `LLMClient.chat(...)`. Never `import anthropic` or `import openai` outside `app/llm/`. (C10)
-6. **No automatic rollback / `.blend` snapshots**. Rely on Blender's native undo. (B7)
-7. **Secrets via environment variables only**. API keys in `.env` (gitignored), never hardcoded.
-8. **Don't modify existing tests** unless the task explicitly is about them. Add new tests instead.
+T1 logs: `tools-5.2/runtime/logs/bpytest/5.2.2/`.
 
 ---
 
-## Code Style
+## Hard rules
 
-### Python
+1. **A step is a function** decorated `@step("name", ParamsDataclass)` in `src/modpilot/steps/`. Its
+   params are a frozen dataclass. Unknown keys and wrong types are refused before the step runs.
+2. **Every failure raises `StepError`** with a category (`params`, `precondition`, `operator`,
+   `postcondition`, `environment`). No `except: pass`, no "non-fatal" branches, no fallback that
+   guesses. A skip happens only when the params opt in, and it goes in the report's `skipped`.
+3. **Operators run through `modpilot.core.ops.run`**, which requires `{'FINISHED'}` and turns an
+   add-on error popup into a `StepError`. Give context-dependent operators an explicit override
+   (`modpilot.bl.context`) and check the result afterwards.
+4. **Scene names come from `SceneConfig`** (`scene["modpilot_config"]`), never from a literal in a step.
+5. **The bpy-free parts stay bpy-free:** `core.params`, `core.errors`, `core.report`, `core.step`,
+   `core.config`, `presets`, `datafiles`, `physics`, `colliders` and the `formats`, `geom` and
+   `mods` packages. An AST test (`tests/core/test_bpy_free.py`) enforces it.
+6. **No bpy classes registered by `modpilot`.** The package is reloaded in place; a registered class
+   would break that.
+7. **Tests run real code.** A step's test (T1) builds a synthetic scene (`modpilot.testing`) and
+   calls the step in headless Blender. Don't mock Blender.
+8. **Never commit `Ref/`** (Dimi's files, ~900 MB, private). The fork is public.
 
-- **Type hints required** on all function signatures (parameters + return).
-- **Imports**: Ruff enforces isort order (stdlib → third-party → first-party `app.*`).
-- **No `__init__.py` re-exports** — use full import paths.
-- **Datetime**: always timezone-aware (`datetime.now(timezone.utc)`); never `datetime.utcnow()`.
-- **Async**: FastAPI routes are `async def`. Long-running parsing runs in `asyncio.to_thread()`.
-- **Logging**: use `logging` module, not `print` (except in stage scripts where stdout *is* the output).
-- **Pydantic**: separate `BaseModel` schemas for HTTP request/response, distinct from internal data classes.
+---
 
-### Naming
+## Code style
+
+- **Type hints** on function signatures.
+- **Imports:** Ruff's isort order. Inside `modpilot`, import `bpy` within functions in modules
+  the host also imports.
+- **Comments:** English only, and only where the *why* isn't obvious from the code.
+- **Docstrings:** each step module's docstring records what changed on purpose from the legacy tool.
 
 | Category | Style | Example |
-|----------|-------|---------|
-| Python files | `snake_case` | `pose_correction.py` |
-| Variables / functions | `snake_case` | `align_skeleton()` |
-| Classes | `PascalCase` | `BlenderConnection`, `LLMClient` |
-| Constants | `UPPER_SNAKE_CASE` | `BLENDER_HOST`, `DEFAULT_PROVIDER` |
-| HTML / CSS files | `kebab-case` | `phase-card.html` |
-| Phase modules | `snake_case`, plan.md aligned | `physics_bones.py` (video 4) |
-
-### Comments
-
-- **English only** in code.
-- Default to no comments. Add only when the *why* is non-obvious (hidden constraint, non-obvious invariant, workaround).
-- No comments explaining *what* — naming should do that.
+|---|---|---|
+| Files, functions, variables | `snake_case` | `vertex_groups.py`, `bake_mix()` |
+| Classes | `PascalCase` | `StepError`, `VertexGroupsParams` |
+| Constants | `UPPER_SNAKE_CASE` | `CATEGORIES` |
+| Step names | the legacy tool names | `physics_chains` |
 
 ---
 
-## Workflow Constraints
+## Workflow
 
-1. **Plan first, code second**. For any non-trivial change, raise an item in [docs/dev/backlog.md](docs/dev/backlog.md) (or update existing) before coding.
-2. **Update design.md before deviating from a decision**. If implementation reveals a design decision was wrong, amend the relevant section first, then change the code.
-3. **Update backlog.md status** when starting (`⚪ → 🟡`) or completing (`🟡 → 🟢`) a task.
-4. **Run `ruff check` + `pytest` before committing**. Don't commit broken code.
-5. **Commit messages**: Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`).
-6. **Branch names**: `<type>/<scope>` — e.g., `feat/blender-client`, `refactor/phase-base`, `docs/agent-workflow-split`.
-7. **PR titles**: same Conventional Commits format as commits.
+1. **TDD:** write the T0/T1 test first and watch it fail, then write the code.
+2. **Run the suites before committing:** T0 always; T1 for the files you touched; tools-5.2 L3
+   when a step's behaviour changes.
+3. **Commit messages:** Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`).
+4. **Branches:** work goes on `restructure` (or a branch from it) in the fork. Never push to `upstream`.
 
 ---
 
-## Communication Conventions
-
-- **Reply language with user**: 中文（讨论中默认中文，混合英文术语 OK）。
-- **Code comments / commit messages / PR titles / GitHub issue text**: English.
-- **Be concise**. Expand only when necessary.
-- **Ask when uncertain**. Don't guess.
-- **Critique provided code** when reviewing — point out issues directly.
-- **Status badges** are universal across docs.
-
----
-
-## Status Badge Convention
-
-Used in [README.md](README.md) (project status), [docs/dev/design.md](docs/dev/design.md) (decisions), [docs/dev/backlog.md](docs/dev/backlog.md) (tasks).
+## Status badges
 
 | Symbol | Meaning |
-|--------|---------|
+|---|---|
 | 🟢 | Done / decided / passing |
-| 🟡 | In progress / under discussion / partial |
-| ⚪ | Not started / pending |
+| 🟡 | In progress / partial |
+| ⚪ | Not started |
 | 🔴 | Blocked / failing / decision required |
-
-Choosing this 4-state palette over Recall's 3-state ✅/🔶/❌ deliberately — the **🔴 blocked** state has distinct semantics worth surfacing.

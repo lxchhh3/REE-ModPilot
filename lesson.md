@@ -5,81 +5,62 @@
 > **Keep it thin.** Each lesson is ONE trimmed bullet (≤3 lines / ≤300 chars) carrying a stable
 > `#NN`. IDs are never renumbered or reused — cross-refs point here. Depth for the deep ones
 > (`→detail`) lives in [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md); open it **by ID**,
-> never wholesale. Highest ID so far = **#57**; the next new lesson is #58.
+> never wholesale. Highest ID so far = **#59**; the next new lesson is #60.
 > Episodic "what happened / what shipped" narrative belongs in the context-manager, not here.
 
 ---
 
 ## What this project is
 
-AI-guided Blender automation for **RE Engine** character mods (MHWs / MHWI / RE4 / RE9). A FastAPI
-backend drives Blender over the `blender-mcp` socket (port 9876), orchestrating the **Modding-Toolkit**
-addon's `bpy.ops.modder.* / mhws.*` operators. The LLM makes classification decisions *inside* phase
-tools and orchestrates *between* phases; deterministic Python handles everything within a phase.
-MVP target: MHWs single-game, plan.md videos 1-7, L3 acceptance (mod runs in-game).
+kevin's fork of Dimi's ModPilot, restructured 2026-10-19 → 10-21 ([docs/dev/restructure.md](docs/dev/restructure.md)).
+`ModPilot/src/modpilot` is a library of MH Wilds character-mod steps that runs **inside Blender
+5.2.2**: `import modpilot; modpilot.call("vertex_groups", {...})` returns a report or raises
+`StepError`. Claude Code is the agent. It calls steps in kevin's Blender over Blender Lab MCP (9877)
+or the blender-mcp bridge (9876), or in a headless session. ModPilot has no LLM, agent loop or UI
+of its own any more; the app was deleted in M6 (`1e18e56`).
 
 ## Where to look
 
 | Need | File |
 |------|------|
-| Layout, status, architecture, prerequisites | [README.md](README.md) |
-| Claude footguns, blender-mcp wire protocol, memory map | [CLAUDE.md](CLAUDE.md) — **always read** |
-| Hard rules, commands, naming/style | [AGENTS.md](AGENTS.md) |
-| Shipped work + dated rationale | [CHANGELOG.md](CHANGELOG.md), [docs/dev/backlog.md](docs/dev/backlog.md) |
-| Design decisions (A/B/C/D/E, all 🟢) | [docs/dev/design.md](docs/dev/design.md) |
-| Agent execution manual (goes into the system prompt) | [docs/agent/agent_workflow.md](docs/agent/agent_workflow.md) |
+| Status, calling a step, the three channels, layout, setup, tests | [README.md](README.md) |
+| Driving kevin's Blender, project rules | [CLAUDE.md](CLAUDE.md), **always read** |
+| Step rules, commands, style | [AGENTS.md](AGENTS.md) |
+| Why the code is shaped this way; which old decisions it replaced | [docs/dev/restructure.md](docs/dev/restructure.md) |
+| Where a deleted mocked test's intent went | [docs/dev/restructure_test_mapping.md](docs/dev/restructure_test_mapping.md) |
 | Modding-Toolkit operator reference | [docs/dev/plugin_api.md](docs/dev/plugin_api.md) |
-| Agent-callable tool catalog | [docs/dev/agent-api.md](docs/dev/agent-api.md) |
-| Router/PhaseLoop architecture | [docs/dev/refactor_hierarchical_loop.md](docs/dev/refactor_hierarchical_loop.md) |
 | Lesson depth, by ID | [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md) |
 
 ## How to run
 
+From `ModPilot/`. `uv run pytest` dies with a trampoline error here (#45), so call the venv's Python.
+
 ```bash
-# One-time
-cd ModPilot && uv sync
-
-# Backend (Blender running, addon enabled, "Connect to Claude" clicked)
-uv run uvicorn app.main:app --reload                 # http://127.0.0.1:8000/
-
-# Frontend — (a) browser: fast HMR, text-only paths | (b) Tauri: native drag-drop paths
-cd frontend && pnpm install && pnpm dev              # http://localhost:5173/ (proxies → :8000)
-cd frontend && pnpm tauri:dev                        # spawns modpilot.exe
-
-python cli.py                                        # CLI client (shares agent_sessions by session_id)
-
-# Tests
-uv run pytest -m unit                                # 672 tests, no Blender required
-uv run pytest -m integration                         # requires Blender on 9876
-uv run ruff check app tests                          # NOTE: 94 pre-existing violations, not clean
-uv run python ../verify_blender_mcp.py               # Stage 0 connectivity smoke
-
-# Playwright browser smokes (opt-in; uvicorn must be running on 8000)
-# One-time: uv add --dev playwright && uv run playwright install chromium
-uv run python tests/e2e/error_choice_ui.py
+uv sync
+.venv/Scripts/python.exe -m pytest tests/core                  # T0, bpy-free, seconds
+.venv/Scripts/python.exe -m modpilot_host.bpytest tests/bl/test_physics.py   # T1, headless Blender 5.2.2
+.venv/Scripts/python.exe -m pytest                             # T0 + every T1 file, ~6 min
+.venv/Scripts/python.exe -m pytest -m live                     # doctor in kevin's Blender, read-only
 ```
 
-## Hard rules, for the agent LLM (non-negotiable)
+In live Blender: `import modpilot; print(modpilot.call("doctor", {}))`. The package reaches it
+through the junction `%APPDATA%/Blender Foundation/Blender/5.2/scripts/addons/modules/modpilot`.
 
-> **Not for Claude Code.** These are design invariants the ReAct loop must enforce on the runtime
-> LLM. My own rules live in CLAUDE.md + memory.
+## Step rules
 
-1. LLM never manages operator-level calls. It picks phases and makes classification decisions inside them.
-2. No `execute_code` exposed as an LLM tool in MVP.
-3. State cache is single-source in `app/blender/state.py`. Phase tools never hold local state.
-4. Phase tools return `Result<state_diff, structured_error>`. Never raw exceptions to the LLM.
-5. `import anthropic` / `import openai` only inside `app/llm/`. Business code uses `LLMClient.chat`.
-6. Don't modify existing tests unless the task is about them. Add new tests instead.
-7. Communication with user: 中文; code/comments/commits: pure English.
+1. A step takes a strict frozen params dataclass; unknown keys and wrong types are refused.
+2. Every failure raises `StepError` with a category. No silent paths: no `except: pass`, no guessing
+   fallback. A skip needs an opt-in param and is listed under `skipped`.
+3. Operators go through `core.ops.run` (`{'FINISHED'}` required; an error popup fails the step).
+4. Scene names come from `SceneConfig`, not literals.
+5. Test steps in real headless Blender on synthetic scenes (T1), never against a mocked Blender.
 
 ## Project quirks
 
-- Windows 11 + Blender 4.3.2. PowerShell ≠ Bash syntax (see global lesson.md).
-- `blender-mcp/addon.py` is installed into Blender separately, NOT vendored — don't look for it here.
-- `LLMClient.chat()` is **synchronous** in both providers. No token streaming; SSE granularity is at
-  the tool-call / phase-advance level (L2).
-- DeepSeek V4 sometimes emits tool calls as inline DSML markup instead of the API's `tool_calls`
-  field. `app/agent/dsml.py` parses both paths — new emit sites must cover both.
+- Windows 11 + Blender **5.2.2 only** (4.3 out of scope since 2026-10-20). PowerShell ≠ Bash syntax.
+- The add-ons (Toolkit, MBT, RE Mesh / Chain Editor, blender-mcp) are pinned and installed by
+  tools-5.2 (`pins.toml`, `compat.install_live`), not vendored here.
+- Lessons #1–#33 are mostly about the app deleted in M6; they stay as history.
 
 ---
 
@@ -89,6 +70,8 @@ uv run python tests/e2e/error_choice_ui.py
      ≤3 lines, ≤300 chars, stable #NN, newest at top. Depth → docs/dev/lessons-detail.md by ID.
      A PreToolUse hook gates this format on every Edit/Write. -->
 
+- **#59** `modpilot.reload()` re-imports `modpilot.core.errors`, so a `StepError` imported before it is a stale class: `pytest.raises(StepError)` misses the new one and the test fails. Import `errors` inside the test, or check `e.category`, not the class.
+- **#58** pose_correction's MMD / Endfield T-pose conversion fails headless: the Toolkit's `core/pose_ops._apply_and_rebind` calls `object.select_grouped`, whose poll fails in 5.2 even with the Layout 3D View lent via `temp_override` (cf. #43). T1 keeps it a strict xfail.
 - **#57** The legacy tools' scene diff (objects_added / removed / count) is built on blender-mcp `get_scene_info`, which lists only the FIRST 10 objects: past 10 objects it reports adds and removes that never happened. The new core snapshots every object; compare scenes by fingerprint.
 - **#56** Blender 4 renamed Principled 'Emission' to 'Emission Color' and defaults Emission Strength to 0, which the Toolkit's generator reads as not emissive: material_setup skipped every emission map. Look slots up by alias; turn a zero strength on.
 - **#55** RE Chain Editor has no 'RE_CHAIN_CHAINNODE' type, node `parent_bone` or group `chainSetting`; SHARED mode and collider_create used them and got nothing back (every chain the first type, every head ''). Head = first RE_CHAIN_NODE child's BoneName; settings = parent.

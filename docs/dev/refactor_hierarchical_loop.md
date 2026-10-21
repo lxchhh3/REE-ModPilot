@@ -1,3 +1,5 @@
+> **Historical (2026-10-21).** This describes ModPilot's own agent, LLM layer, app or legacy tools, deleted in restructure M6 (`1e18e56`). Code paths, commands and test counts here no longer exist; domain notes may still hold. Current docs: [README](../../README.md), [restructure record](../../docs/dev/restructure.md).
+
 # ModPilot — Hierarchical Agent Loop Refactor (Router + PhaseLoop)
 
 > **Status:** 🟢 shipped. PRs 1-6 landed and pushed as commit `283bec8` (issue #20, 2026-05-24).

@@ -1,3 +1,5 @@
+> **Historical (2026-10-21).** This describes ModPilot's own agent, LLM layer, app or legacy tools, deleted in restructure M6 (`1e18e56`). Code paths, commands and test counts here no longer exist; domain notes may still hold. Current docs: [README](../../README.md), [restructure record](../../docs/dev/restructure.md).
+
 # Agent Callable API Reference
 
 > 当前 Agent 可调用的所有工具清单。按类别分组，供开发者查阅和扩展。

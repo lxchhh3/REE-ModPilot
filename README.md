@@ -1,241 +1,144 @@
 # REE-ModPilot
 
-> AI-guided Blender automation for crafting RE Engine character mods.
+> MH Wilds character-mod steps that run inside Blender, as a Python library.
 >
-> 面向 RE Engine 游戏（MHWs / MHWI / RE4 / RE9）的 Mod 制作 AI Agent 原型。
+> 面向 MH Wilds 人物 Mod 的 Blender 步骤库（在 Blender 内运行）。
+
+This is kevin's fork ([lxchhh3/REE-ModPilot](https://github.com/lxchhh3/REE-ModPilot), branch
+`restructure`) of [Dimcirui/REE-ModPilot](https://github.com/Dimcirui/REE-ModPilot). Dimi's
+original, an AI agent with its own LLM loop, FastAPI backend and React/Tauri app, is still in
+Dimi's repo and in this fork's history before `1e18e56`.
 
 ---
 
 ## Status
 
-**MVP shipped** — Stages 0 / Setup / 1 / 2 / 3 / 4 / 5 / MVP-verification all 🟢, L3 in-game
-acceptance against MMD/VRC source models. **672 unit tests**, 70+ Playwright checks.
-All design items in [docs/dev/design.md](docs/dev/design.md) (A/B/C/D/E layers) are 🟢 decided.
-
-| Milestone | State |
-|-----------|-------|
-| Post-MVP polish | ongoing — see [docs/dev/backlog.md](docs/dev/backlog.md) for open P1-P3 items |
-| Latest shipped | #19 texture-slot fix, #20 hierarchical loop split + Phase 4C colliders, #21 `RE_CHAIN_HEADER` calibration, #22 VLM-assisted PBR classification — dated detail in [CHANGELOG.md](CHANGELOG.md) |
-| First full agent-path export | 🟢 2026-08-06 — Maya Ver1.02.2 → mesh/mdf2/chain2 + 19 tex + fbxskel in `ModPilot/artifacts/e2e_mod_out`. Needed two manual assists (lesson `#34`); textures must be pak'd to load (`#35`). L3 in-game check still outstanding. |
+| | |
+|---|---|
+| Restructure (2026-10-19 → 10-21) | 🟢 M0–M3, M5–M7 done; M4 (builds as recipe files) dropped. Record: [docs/dev/restructure.md](docs/dev/restructure.md) |
+| Who drives it | Claude Code, in kevin's Blender 5.2.2 or in headless Blender. ModPilot has no agent or UI of its own any more |
+| Verified | Three builds passed in game with ModPilot's tools (claude_run1, GG, Marette). Every step is tested in a real headless Blender 5.2.2 |
+| Next | Group B (physics defaults) and group C (materials), ported from the recipes that passed in game |
+| Blender | 5.2.2 only. 4.3 has been out of scope since 2026-10-20 |
 
 ---
 
-## Project Status: Paused (2026-05-25)
+## How it works
 
-The MVP works and was verified at L3 — mods exported through the full pipeline load and run in-game. Development stopped anyway, for an architectural reason worth stating plainly.
+`ModPilot/src/modpilot` is a plain Python package that Blender imports. It registers no bpy
+classes. One call runs one step:
 
-**ModPilot is a workflow, not an agent.**
+```python
+import modpilot
+report = modpilot.call("vertex_groups", {"mesh_objects": ["Body"], "x_preset": "VRChat"})
+```
 
-The execution graph is a single line: phases 1→6, fixed order. The LLM's real authority is *classification within a phase* (which bones are physics bones, which texture maps to which slot) — not *deciding what to do next*. Starting mid-pipeline only means picking an insertion point on that same line and continuing downstream. At no point does the system look at the current scene, form its own judgement about what state it is in, and choose an action accordingly.
+- **Report:** `{ok, step, params, data, warnings, skipped, scene_diff, popups, seconds, code, blender}`.
+  It is also printed as one `MODPILOT_REPORT=<json>` line, so a channel that returns only stdout
+  still carries it.
+- **Failure:** every failure raises `StepError(category, message, step, operator, details,
+  partial)`, printed as `MODPILOT_ERROR=<json>`. The category is one of `params`, `precondition`,
+  `operator`, `postcondition`, `environment` or `internal`. Nothing fails silently.
+- **Params:** each step takes a strict frozen dataclass. Unknown keys and wrong types are refused.
+- **Reload:** before each call, ModPilot re-imports any of its modules whose source changed.
+  The report's `code.reloaded` says so.
+- **Help:** `modpilot.steps()` lists the steps, and `modpilot.describe(name)` gives one step's
+  params and docstring.
 
-Turning it into a real agent is not primarily a coding problem. Autonomous evaluation requires knowing **what an observation means** — "the mesh renders black in-game" → a ranked set of causes with the evidence behind each. That is domain knowledge, and for RE Engine model replacement it is largely unwritten: scattered across chat logs, tool source, and the heads of a handful of people.
+### Three ways to reach a Blender
 
-⇒ Work moved to building that knowledge layer as a separate project. It is not public yet; an open-source knowledge base is planned once the corpus is solid enough to stand on its own. ModPilot resumes when there is something to plug into it.
+| Channel | Where | Use it for |
+|---|---|---|
+| Blender Lab MCP, port 9877 | kevin's Blender, through Claude Code's MCP tools (`modpilot_host.transport.LabTransport` from Python) | short steps and looking at the scene; its server gives up after 300 s |
+| Community blender-mcp bridge, port 9876 | kevin's Blender (`modpilot_host.transport.BridgeTransport`) | long steps: `physics_chains`, `material_generate`, `batch_export` |
+| Headless session, free port | a private `blender -b` with the pinned add-ons (`modpilot_host.session.HeadlessSession`) | tests, replays and anything that must not touch the live scene |
 
-**What is here is complete and runnable**: 16 phase tools, hand-rolled ReAct loop, provider-agnostic LLM client, React 19 + Tauri frontend, 526 unit tests / 70+ Playwright checks.
+Every channel sends the same two lines: `import modpilot` and `modpilot.call(step, params)`.
+
+### Steps
+
+| Module | Steps |
+|---|---|
+| `setup` | `setup_import_source`, `setup_validate_scene`, `setup_infer_model_type`, `setup_preset_supplement_write`, `setup_preset_custom_write`, `setup_import_mhwilds` |
+| `pose` | `pose_correction`, `skeleton_align` |
+| `vertex_groups` | `vertex_groups` |
+| `physics` | `physics_transplant`, `physics_classification`, `physics_chains`, `physics_adjust` |
+| `colliders` | `collider_create`, `collider_apply` |
+| `materials` | `material_setup`, `material_generate`, `material_inspect`, `material_consolidate` |
+| `export` | `batch_export` |
+| `garments` | `mute_shape_keys`, `rebind_rigid_garments`, `restore_leaf_bones` |
+| `query` | `list_objects`, `scene_info`, `get_bone_info`, `list_collections`, `get_mesh_info`, `get_material_info`, `get_object_props`, `inspect_material_nodes`, `physics_read`, `list_mdf_presets` |
+| `doctor`, `fingerprint` | `doctor` (add-ons and versions), `scene_fingerprint` (a comparable digest of the scene) |
 
 ---
 
-## Vision
+## Layout
 
-For Blender-literate users who want to make RE Engine character mods but lack RE Engine modding experience: ModPilot is a **step-by-step AI guide + Blender automation layer** that compresses the mod-making pipeline (`docs/user/plan.md` videos 1-7) from hours to ≤ 1 hour.
+```
+ModPilot/src/
+├── modpilot/          runs inside Blender
+│   ├── core/          call(), @step registry, params, StepError, report, SceneConfig, snapshot, ops.run, popups
+│   ├── steps/         the steps above
+│   ├── bl/            Blender helpers: context overrides, joins, fits, chains, source fixes
+│   ├── formats/       bpy-free file code: chain2, jcns, mdf, mesh patch, key rows, unitypackage
+│   ├── geom/          bpy-free numpy: similarity fit, cones, legs, weights, GPU cloth grid
+│   ├── mods/          whole-mod edits: relocate, colour_fix
+│   ├── testing/       synthetic scenes and rigs for the tests
+│   └── data/          physics_presets.json, clsp_body_bits.json, full_body.clsp.3, armor_sets.json
+└── modpilot_host/     runs on the host, no bpy
+    ├── transport.py   LabTransport (9877), BridgeTransport (9876)
+    ├── session.py     HeadlessSession
+    ├── bpytest.py     pytest inside headless Blender
+    └── tools52.py     finds tools-5.2 (pinned add-ons, isolated profiles)
+```
 
-**MVP scope** (locked in design.md A4):
-
-| Dimension | Decision |
-|-----------|----------|
-| Target game | **MHWs** (single-game deep integration) |
-| Source models | User-provided; **MMD-preferred / VRC-secondary** |
-| Pipeline range | plan.md videos 1-7 (full pipeline) |
-| Acceptance | **L3** — exported mod actually runs in-game |
-| Time target | 30 min marketing anchor / 1 hr engineering target |
-
-The AI's value concentrates in **videos 4-7** (physics bones / materials / batch export / advanced) where experience-class classification decisions matter (e.g. physics-vs-body bone naming, PBR channel mapping, equipment slot routing). Videos 1-3 are mostly mechanical button-pushes.
+ModPilot leans on **tools-5.2** (`Blender-MHWilds/tools-5.2`, beside this checkout; set
+`MODPILOT_TOOLS52` to point elsewhere). tools-5.2 pins the Blender builds and add-on versions,
+builds the isolated profiles, and its L0/L3 suites replay ModPilot's steps.
 
 ---
 
-## Architecture
+## Setup
 
-```
-Browser (Vite dev server :5173) ────────────╮
-   or                                       │ Same React 19 + TS bundle
-Tauri desktop shell (modpilot.exe) ─────────┤  (browser-mode falls back to
-                                            │   text path inputs; desktop
-                                            │   gets native drag-and-drop)
-                                            ↓
-                          React SPA (motion + structured JSON SSE)
-                                            │
-                          FastAPI backend (CORS / Vite proxy)
-                            ├── Agent loop          (hand-rolled ReAct: RouterLoop + 13 PhaseLoops)
-                            ├── Phase tools         (30-tool catalog across 13 phases; each
-                            │                        PhaseLoop sees only its own subset)
-                            ├── LLM client          (provider-agnostic: Anthropic / OpenAI-compatible / Ollama)
-                            └── Blender client      (TCP socket, thread-safe RLock)
-                                            ↓
-                          blender-mcp addon.py       (port 9876 — `execute_code` channel)
-                                            ↓
-                          User's Modding-Toolkit     (bpy.ops.modder.* / mhws.* / re4.* / etc.)
-```
+1. **Add-ons in kevin's Blender:** in tools-5.2, run `uv run python -m compat.install_live`. It
+   installs the pinned Modding-Toolkit, Modder_Batch_Tool, RE Mesh Editor, RE Chain Editor and
+   blender-mcp, plus Blender Lab MCP. The set is listed in `tools-5.2/pins.toml`.
+2. **The package:** make a directory junction
+   `%APPDATA%\Blender Foundation\Blender\5.2\scripts\addons\modules\modpilot` → `ModPilot\src\modpilot`.
+   `addons/modules` is on Blender's `sys.path`; `scripts/modules` is not (Blender-MHWilds
+   lesson #98). Headless sessions link it themselves.
+3. **Host tools:** `cd ModPilot && uv sync`.
+4. **Pytest for Blender's Python:** `uv pip install --target .bldeps --python-version 3.11 pytest`.
 
-**Key architectural decisions**:
+## Tests
 
-- **Phase tool middle layer**, not raw operator wrappers. LLM orchestrates *between* phases and makes *classification* decisions inside phases; deterministic Python orchestrates *within* phases. (B6)
-- **Hierarchical agent loop** — a dumb `RouterLoop` owns session-wide state (phase index, move log, SSE sink) and delegates each turn to one of 13 per-phase `PhaseLoop` instances, each carrying only its own scoped system prompt + tool subset. Cut the per-request token floor from ~30.6k to ~4-7.5k. (see [docs/dev/refactor_hierarchical_loop.md](docs/dev/refactor_hierarchical_loop.md))
-- **Provider-agnostic LLM client** (~150 lines). Default DeepSeek V4 for development; Claude Sonnet 4.6 / Haiku 4.5 as oracle fallback; Ollama Cloud (`deepseek-v4-flash`) as a third option. Runtime-switchable via `/config` UI — no restart needed. (C10)
-- **No RAG in MVP** — `docs/agent/agent_workflow.md` (machine-readable execution manual) goes directly into system prompt + prompt cache. `plan.md` is the video script for humans only. Content RAG retained as a future upgrade path. (C11)
-- **React 19 + TypeScript + Vite** frontend, with `motion` for transitions; same SSE event surface as the original htmx build. **Tauri v2** ships an optional Rust desktop shell so the path inputs can accept native file/directory drag-and-drop (impossible inside a browser sandbox). (C25 — supersedes C12)
-- **Confirmation widgets** — server-rendered Jinja partials pushed over SSE for Phase 4A (physics bone classification) and Phase 5 (material slot → texture mapping). User edits the widget in-browser; confirmed values re-enter the agent loop as prefixed JSON messages.
+Run these from `ModPilot/`. `uv run pytest` fails here with a trampoline error (lesson #45), so
+call the venv's Python.
 
----
+| Tier | What | Command |
+|---|---|---|
+| T0 | bpy-free code: formats, geom, params, transport, presets; an AST test bans `bpy` there | `.venv/Scripts/python.exe -m pytest tests/core` |
+| T1 | real steps on synthetic scenes in headless Blender 5.2.2, one Blender per file | `.venv/Scripts/python.exe -m modpilot_host.bpytest tests/bl/test_*.py` |
+| all host | T0 plus `tests/blender`, which runs every T1 file (344 tests, ~6 min) | `.venv/Scripts/python.exe -m pytest` |
+| live | `doctor` over 9876 and 9877 in kevin's Blender (read-only) | `.venv/Scripts/python.exe -m pytest -m live` |
+| L0/L3 | tools-5.2: the operators ModPilot calls exist; the claude_run1 replay; the group-A fixes | in tools-5.2: `.venv/Scripts/python.exe -m pytest tests/test_l0_*.py tests/test_l3_*.py -k "not 4.3.0"` |
 
-## Tech Stack
-
-| Layer | Choice | Decided in |
-|-------|--------|-----------|
-| Runtime | Python 3.11+ | — |
-| Web framework | FastAPI | C9 |
-| Package manager | uv | C13 |
-| LLM (dev default) | DeepSeek V4 (OpenAI-compatible API) | C10 |
-| LLM (oracle / fallback) | Claude Sonnet 4.6 / Haiku 4.5 (Anthropic SDK) | C10 |
-| LLM (third option) | Ollama Cloud (`deepseek-v4-flash` / `deepseek-v4-pro`) | C10 |
-| Agent framework | Hand-rolled ReAct (raw SDKs, no LangChain in MVP) | C9 |
-| Frontend | React 19 + TypeScript + Vite + motion (SPA) | C25 (supersedes ~~C12~~) |
-| Desktop shell (optional) | Tauri v2 (Rust + WebView2) — enables native drag-and-drop file pickers | C25 |
-| Blender integration | TCP socket via blender-mcp addon | Stage 0 |
-| Tests | pytest (`unit` / `integration` markers) | D14 |
-| Lint / format | Ruff | D14 |
-
----
-
-## Project Structure
-
-```
-REE-ModPilot/
-├── ModPilot/                     # Backend application
-│   ├── pyproject.toml            # uv-managed
-│   ├── uv.lock
-│   ├── .env.example
-│   ├── app/
-│   │   ├── main.py               # FastAPI routes (chat, SSE, widgets, config, screenshot)
-│   │   ├── config.py             # Settings (LLM / Blender / vision); runtime-mutable
-│   │   ├── config_store.py       # ~/.modpilot/config.json persistence
-│   │   ├── toolkit_probe.py      # Modding-Toolkit presence / version probe
-│   │   ├── agent/                # RouterLoop + 13 PhaseLoops, prompts, MoveLog, DSML parser
-│   │   ├── blender/              # BlenderClient (thread-safe), SceneCache, preset_catalog
-│   │   ├── llm/                  # LLMClient (Anthropic / OpenAI-compatible / Ollama) + vision
-│   │   ├── data/                 # armor_sets, physics_presets, clsp body bits
-│   │   └── phases/               # 21 phase tools (30-tool catalog incl. query + meta tools)
-│   ├── frontend/                 # React 19 + TS + Vite + motion SPA
-│   │   ├── src/                  #   pages, stages (per-phase UI), components, hooks, lib, types
-│   │   └── src-tauri/            #   Tauri v2 Rust shell — see docs/dev/desktop_build.md
-│   ├── scripts/ eval/            # Playwright walkthrough recorders; context-eval harness
-│   ├── artifacts/                # Generated; gitignored. Mod exports + walkthrough webms
-│   └── tests/                    # unit (mocked) | integration (real Blender) | e2e (Playwright)
-├── docs/
-│   ├── agent/                    # agent_workflow.md — injected into the LLM system prompt
-│   ├── dev/                      # design, backlog, plugin_api, agent-api, lessons-detail, …
-│   └── user/                     # plan.md (7-video script), demo_setup.md
-├── verify_blender_mcp.py         # Stage 0 connectivity verification (5 checks)
-├── verify_mvp.py                 # Headless E2E script — drives phase tools directly, no agent loop
-├── lesson.md                     # Session primer + trimmed lesson log — read this first
-├── README.md                     # ← you are here
-├── CLAUDE.md                     # Claude-specific working notes
-└── AGENTS.md                     # Contributor baseline (commands, conventions)
-```
-
----
-
-## Prerequisites
-
-- Blender 4.3.2 (other 4.x may work, untested)
-- Python 3.11+
-- [uv](https://github.com/astral-sh/uv)
-- An LLM API key — DeepSeek V4 recommended for development; Anthropic key as oracle / fallback
-
-### Required Blender addons (install separately — not vendored)
-
-Install these into your Blender add-on directory before using ModPilot:
-
-| Addon | Source | Role |
-|-------|--------|------|
-| **Modding-Toolkit** | [Dimcirui/Modding-Toolkit](https://github.com/Dimcirui/Modding-Toolkit) | Provides the `bpy.ops.modder.* / mhws.* / re4.* / re9.* / mhwi.*` operators ModPilot orchestrates |
-| **Modder_Batch_Tool** | [Dimcirui/Modder_Batch_Tool](https://github.com/Dimcirui/Modder_Batch_Tool) | Provides the `modder.* / mbt.*` operators ModPilot orchestrates |
-| **blender-mcp** | [ahujasid/blender-mcp](https://github.com/ahujasid/blender-mcp) | TCP socket bridge on `localhost:9876` (we only use its `addon.py`, not the FastMCP server) |
-| **RE-Mesh-Editor** | [NSACloud/RE-Mesh-Editor](https://github.com/NSACloud/RE-Mesh-Editor) | Provide editing dependencies for .mesh model files and .mdf2 material files |
-| **RE-Chain-Editor** | [NSACloud/RE-Chain-Editor](https://github.com/NSACloud/RE-Chain-Editor) | Provide editing dependencies for .chain2 physics files and .clsp collision files |
-
-After enabling both in Blender → Edit → Preferences → Add-ons, open the BlenderMCP side panel (N-key in 3D viewport) and click **Connect to Claude** — the socket server starts on port 9876.
-
----
-
-## Quick Start
-
-**1. Verify Blender connectivity (Stage 0)**
-
-```bash
-# In Blender: enable both addons, open the BlenderMCP side panel,
-# click "Connect to Claude" so port 9876 starts listening.
-python verify_blender_mcp.py
-```
-
-Expected output ends with `=== Stage 0 PASSED. Pipeline is alive. ===`.
-
-**2. Run the backend**
-
-```bash
-cd ModPilot
-uv run uvicorn app.main:app --reload   # binds 127.0.0.1:8000
-```
-
-**3. Run the frontend (pick one)**
-
-```bash
-# (a) Browser mode — fastest dev loop, text-only path inputs
-cd ModPilot/frontend
-pnpm install                 # one-time
-pnpm dev                     # http://localhost:5173, proxies /agent /app /viewport_screenshot /health → :8000
-
-# (b) Tauri desktop mode — native drag-and-drop file/dir paths via PathField
-cd ModPilot/frontend
-pnpm tauri:dev               # boots Vite, then spawns the Rust shell pointing at it
-```
-
-LLM config: first launch (no API key) redirects to `/config`. Enter provider / key / model, or seed via `ModPilot/.env` (see `.env.example` — `LLM_PROVIDER=ollama`, `LLM_API_KEY=…`, `LLM_MODEL=deepseek-v4-flash` for Ollama Cloud). Settings layer in `~/.modpilot/config.json`; `.env` is git-ignored.
-
-**4. Start a mod session**
-
-Fill in the session-config form (source file path, mod root, character name, body part radio, hunter type, armor set, etc.) and click **Start**. The agent walks through Phases 1-6 automatically, pausing at classification checkpoints (physics bone table, material texture mapping) for user confirmation via in-browser widgets.
-
-**5. Run unit tests**
-
-```bash
-uv run pytest -m unit -v   # 672 tests, no Blender required
-```
-
-**6. (Optional) Headless MVP verification**
-
-```bash
-# Copy and fill in the config template, then:
-python verify_mvp.py --config verify_mvp_config.json [--phases setup phase_1_2_3 ...] [--report out.json]
-```
-
-See `docs/user/demo_setup.md` for prerequisite addon install order, MMD model recommendations, mod folder layout, and the full config field reference.
+[docs/dev/restructure_test_mapping.md](docs/dev/restructure_test_mapping.md) maps each deleted
+mocked test to the test that covers it now.
 
 ---
 
 ## References
 
 | Doc | Purpose |
-|-----|---------|
-| [lesson.md](lesson.md) | Session primer + trimmed lesson log (`#NN`; depth in `docs/dev/lessons-detail.md`) |
-| [CLAUDE.md](CLAUDE.md) | Claude-specific working notes (footguns, blender-mcp wire protocol, memory map) |
-| [AGENTS.md](AGENTS.md) | Agent / contributor baseline (commands, hard rules, conventions) |
-| [CHANGELOG.md](CHANGELOG.md) | Dated release history; [docs/dev/backlog.md](docs/dev/backlog.md) for open P1-P3 work |
-| [docs/dev/design.md](docs/dev/design.md) | A/B/C/D/E-layer design decisions (rationale, alternatives, escape hatches) |
-| [docs/agent/agent_workflow.md](docs/agent/agent_workflow.md) | Machine-readable execution manual (phases 1-6, protocols, operator index) |
-| [docs/dev/plugin_api.md](docs/dev/plugin_api.md) | Modding-Toolkit operator API reference |
-| [docs/dev/agent-api.md](docs/dev/agent-api.md) | Agent-callable tool catalog |
-| [docs/dev/refactor_hierarchical_loop.md](docs/dev/refactor_hierarchical_loop.md) | RouterLoop + PhaseLoop architecture |
-| [docs/dev/desktop_build.md](docs/dev/desktop_build.md) | Tauri installer build + code signing |
-| [docs/user/plan.md](docs/user/plan.md) | 7-video mod-making workflow script (human reference) |
-| [docs/user/demo_setup.md](docs/user/demo_setup.md) | Addon install order, model setup, L3 acceptance procedure |
+|---|---|
+| [lesson.md](lesson.md) | Session primer and lesson log, read first |
+| [CLAUDE.md](CLAUDE.md) | Working notes for Claude Code |
+| [AGENTS.md](AGENTS.md) | Rules, commands and style |
+| [docs/dev/restructure.md](docs/dev/restructure.md) | Why and how the fork was restructured, and which old decisions it replaced |
+| [docs/dev/design.md](docs/dev/design.md) | Dimi's A–E decisions (many replaced; see restructure.md) |
+| [docs/dev/plugin_api.md](docs/dev/plugin_api.md) | Modding-Toolkit operator reference |
+| [docs/user/plan.md](docs/user/plan.md) | The 7-video mod-making walkthrough (human reference) |
+| [CHANGELOG.md](CHANGELOG.md) | Dated history |
+
+Docs under `docs/` that open with a "Historical" banner describe the app deleted in M6.

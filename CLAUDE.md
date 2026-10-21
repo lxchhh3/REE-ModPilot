@@ -1,92 +1,65 @@
 # CLAUDE.md
 
-**Always read [lesson.md](lesson.md) at the start of every conversation in this project** — orientation primer, run commands, hard rules, and the trimmed lesson log. Read it before anything else.
+**Always read [lesson.md](lesson.md) at the start of every conversation in this project.** It holds
+the primer, the run commands, the step rules and the trimmed lesson log.
 
-Working notes specific to Claude Code / Claude API agents in this repo.
-
----
-
-## Read These First (in order)
-
-1. [lesson.md](lesson.md) — Primer + lesson log. Hard requirement: read first, every session.
-2. [README.md](README.md) — Status, architecture, layout, prerequisites.
-3. [AGENTS.md](AGENTS.md) — Hard rules + commands + style + workflow.
-
-Everything else is opened **on demand**, not up front: `docs/dev/lessons-detail.md` by lesson ID,
-`docs/dev/design.md` for a decision's rationale, `docs/dev/backlog.md` for open work,
-`docs/dev/plugin_api.md` for an operator signature, `docs/user/plan.md` for the video workflow.
-
-## Doc-weight discipline (2026-08-06)
-
-`lesson.md` had grown to ~8.5k tokens and README to ~5.5k — both loaded every session. Keep them thin:
-
-- **lesson.md** = ONE trimmed bullet per fix, ≤3 lines / ≤300 chars, stable `#NN`, newest at top.
-  Depth goes to [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md) under the same ID with a
-  `(→detail)` marker. A `PreToolUse` hook (`~/.claude/hooks/lesson_format_check.py`) enforces the
-  limit — it matches on the `**#NN**` prefix, so an ID-less bullet silently bypasses the gate.
-- **README.md** = pointers and skeletons, not prose. Release-time detail lives in
-  `docs/dev/desktop_build.md`; dated history in `CHANGELOG.md`.
-- **Episodic "what happened / what shipped"** goes to the **context-manager**, not into these files —
-  it is indexed, drillable by `entry_id`, and doesn't tax every future session's context.
-
-## Current Stage
-
-**MVP shipped**; current work is post-MVP polish (P1 → P3 in the backlog). 672 unit tests green,
-70+ Playwright checks, L3 acceptance against MMD/VRC models. Architecture: FastAPI + hand-rolled
-ReAct (`RouterLoop` + 13 `PhaseLoop`s, 30-tool catalog) + React 19/Vite SPA + optional Tauri v2 shell.
-
-Latest milestone — **2026-08-06, first full export through the agent path** (Maya Ver1.02.2 →
-`ModPilot/artifacts/e2e_mod_out`), not yet autonomous and not yet L3-verified. Blockers and
-diagnostics are lessons `#33`/`#34`/`#35`. For dated history see [CHANGELOG.md](CHANGELOG.md); for
-live status see the context-manager board injected at session start.
+Working notes for Claude Code in this repo.
 
 ---
 
-## blender-mcp Wire Protocol (footgun-prone — read carefully)
+## Read these first (in order)
 
-Read `addon.py` directly from wherever blender-mcp is installed — it is **not vendored here** (see Prerequisites in [README.md](README.md); typically `%APPDATA%\Blender Foundation\Blender\4.3\scripts\addons\blender-mcp\addon.py` or your clone of [ahujasid/blender-mcp](https://github.com/ahujasid/blender-mcp)). Do **not** trust that repo's README — it describes `server.py`'s MCP wrapper, not the raw socket protocol.
+1. [lesson.md](lesson.md): primer and lesson log. Read it first, every session.
+2. [README.md](README.md): status, how a step is called, the three channels, layout, setup, tests.
+3. [AGENTS.md](AGENTS.md): rules, commands, style.
 
-- **Request**: pure JSON object, **no newline / no length prefix**.
+Open everything else on demand: `docs/dev/lessons-detail.md` by lesson ID,
+`docs/dev/restructure.md` for why the code looks the way it does, `docs/dev/plugin_api.md` for a
+Toolkit operator, `docs/dev/restructure_test_mapping.md` for where an old test's intent went.
 
-  ```json
-  {"type": "execute_code", "params": {"code": "..."}}
-  ```
+## Doc weight (2026-08-06)
 
-- **Response**: pure JSON object, also no separator.
+- **lesson.md**: one trimmed bullet per lesson, at most 3 lines / 300 chars, a stable `#NN`, newest
+  at top. Depth goes to [docs/dev/lessons-detail.md](docs/dev/lessons-detail.md) under the same
+  ID with a `(→detail)` marker. A `PreToolUse` hook (`~/.claude/hooks/lesson_format_check.py`)
+  enforces the limit. It matches on the `**#NN**` prefix, so a bullet without an ID slips past it.
+- **README.md**: pointers and skeletons, not prose. Dated history goes in `CHANGELOG.md`.
+- **What happened / what shipped** goes to the context-manager board, not into these files.
 
-  ```json
-  {"status": "success", "result": {"executed": true, "result": "<stdout>"}}
-  ```
+## Current stage (2026-10-21)
 
-  Errors: `{"status": "error", "message": "..."}`.
-- **`execute_code` returns stdout only** — `exec(code)`'s last expression is **not** auto-returned. Always `print(...)` to get values back.
-- **Reading the socket**: loop `recv()` accumulating buffer, retry `json.loads` each iteration; success = full response. **Don't read by line. Don't read by fixed length.**
-- **Operator stdout pollution**: Modding-Toolkit operators may `print` their own debug output, which interleaves with our `print(...)`. Use a **sentinel string** to bracket our own output and slice from there. (Pattern in [verify_blender_mcp.py](verify_blender_mcp.py): `SENTINEL = "===STAGE0_OUT==="`.)
-- Built-in handlers (addon.py:206-216): `get_scene_info` / `get_object_info` / `get_viewport_screenshot` / `execute_code`.
-
----
-
-## Memory Files
-
-Persistent context for Claude (in `~/.claude/projects/.../memory/`):
-
-| File | Type | Summary |
-|------|------|---------|
-| `MEMORY.md` | index | One-line pointers to each memory below |
-| `feedback_english_to_kevin.md` | feedback | The 中文 policy governs the runtime agent, not Claude Code — reply to kevin in English |
-| `feedback_planning_first.md` | feedback | Don't jump from tech-validation to implementation; use design docs |
-| `feedback_discuss_alternatives.md` | feedback | Discuss unsuitable options too — user uses this project as a learning vehicle |
-| `project_python_over_llm.md` | project | LLM only at phase-internal classification points; deterministic Python everywhere else |
-| `project_state_2026_08.md` | project | kevin drives this solo since ~July 2026; Aug-6 first-export milestone + working runtime setup |
-| `project_may_leftovers.md` | project | What the archived May-19 session logs / eval report are; both bugs they exposed are fixed at HEAD |
-| `recall_as_template.md` | reference | Project structure (README/CLAUDE/AGENTS/backlog) borrows from YoungZ2357/Recall |
+The restructure is done (M0–M3, M5–M7; M4 dropped). ModPilot is a library: `src/modpilot` runs
+inside Blender, `src/modpilot_host` on the host. Claude Code is the agent. It calls steps in
+kevin's Blender 5.2.2 over Blender Lab MCP (9877) or the bridge (9876), or in a headless session.
+Next: groups B (physics defaults) and C (materials). Record:
+[docs/dev/restructure.md](docs/dev/restructure.md).
 
 ---
 
-## Project-Specific Quirks & Rules
+## Driving kevin's Blender
 
-- **User Platform**: Windows 11 and Blender 4.3.2.
-- **Working rules**: kevin's global `~/.claude/CLAUDE.md` governs work here (TDD; ask when an instruction
-  is unclear; follow his decisions and discuss before changing one). The language, interaction and
-  workflow rules Dimi set at the project's start (cf872ef, 2026-05-09: reply in 中文, plan-then-code,
+- **Calling a step.** Through Lab MCP's execute tool, send
+  `import modpilot; print(modpilot.call("doctor", {}))`. A step that may run past 300 s
+  (`physics_chains`, `material_generate`, `batch_export`) goes over 9876 with
+  `modpilot_host.transport.BridgeTransport(timeout=...)` instead.
+- **Edits reach live Blender without a restart.** `modpilot.call` re-imports changed modules first.
+  Check the report's `code.reloaded` and `code.sha` to see which code ran.
+- **The live scene is unsaved work.** Use a headless session (`HeadlessSession`) for anything
+  experimental, and touch the live scene only when kevin asks.
+- **The bridge's wire protocol** (9876): one raw JSON object each way, no newline and no length
+  prefix. `{"type": "execute_code", "params": {"code": ...}}` goes in;
+  `{"status": "success", "result": {"result": <stdout>}}` or `{"status": "error", "message": ...}`
+  comes back. Read until the buffer parses as JSON. `transport.py` already does this, and finds the
+  report by its `MODPILOT_REPORT=` line among the add-ons' own prints.
+
+## Project rules
+
+- **Platform:** Windows 11, Blender **5.2.2 only**. 4.3 has been out of scope since 2026-10-20. In
+  tools-5.2, run L3 with `-k "not 4.3.0 and not test_new_blender_builds_the_same_mod_as_old and
+  not test_new_blender_returns"`.
+- **The fork is public.** `Ref/` (Dimi's BHS_fixed, ~900 MB) must never be committed. Scan diffs
+  for secrets before pushing. Push to `fork` only; `upstream` (Dimi's repo) has its push URL disabled.
+- **Working rules:** kevin's global `~/.claude/CLAUDE.md` governs work here: TDD, ask when an
+  instruction is unclear, follow his decisions and discuss before changing one. Reply in English.
+  The rules Dimi set at the project's start (cf872ef, 2026-05-09: reply in 中文, plan-then-code,
   strict scope) were dropped on 2026-10-16, when kevin took the project over.

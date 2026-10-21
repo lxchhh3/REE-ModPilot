@@ -1,3 +1,5 @@
+> **Historical (2026-10-21).** This describes ModPilot's own agent, LLM layer, app or legacy tools, deleted in restructure M6 (`1e18e56`). Code paths, commands and test counts here no longer exist; domain notes may still hold. Current docs: [README](../../README.md), [restructure record](../../docs/dev/restructure.md).
+
 # Desktop Build & Code Signing
 
 How to ship the Tauri shell as a single-click Windows installer. Moved out of README.md
